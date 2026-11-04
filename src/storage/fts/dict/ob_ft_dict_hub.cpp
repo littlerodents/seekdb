@@ -18,6 +18,7 @@
 
 #include "storage/fts/dict/ob_ft_dict_hub.h"
 
+#include "lib/lock/ob_tc_rwlock.h"
 #include "lib/ob_errno.h"
 #include "lib/oblog/ob_log_module.h"
 #include "lib/utility/ob_macro_utils.h"
@@ -56,26 +57,59 @@ int ObFTDictHub::build_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &
   if (!is_inited_) {
     ret = OB_NOT_INIT;
   } else {
-    ObBucketHashWLockGuard guard(rw_dict_lock_, key.hash());
+    // First attempt under a short bucket write lock, exactly like before.
+    {
+      ObBucketHashWLockGuard guard(rw_dict_lock_, key.hash());
 
-    // try if valid with no recursive lock
-    if (OB_FAIL(get_dict_info(key, info))) {
-      if (OB_HASH_NOT_EXIST == ret) {
-        // dict not exist, make new one, by caller
-        ret = OB_ENTRY_NOT_EXIST;
-      } else {
-      }
-    } else if (OB_FAIL(ObFTRangeDict::try_load_cache(desc, info.range_count_, container))) {
-      if (OB_ENTRY_NOT_EXIST == ret) {
-      } else {
+      // try if valid with no recursive lock
+      if (OB_FAIL(get_dict_info(key, info))) {
+        if (OB_HASH_NOT_EXIST == ret) {
+          // dict not exist, make new one, by caller
+          ret = OB_ENTRY_NOT_EXIST;
+        } else {
+        }
+      } else if (OB_FAIL(ObFTRangeDict::try_load_cache(desc, info.range_count_, container))) {
+        if (OB_ENTRY_NOT_EXIST == ret) {
+        } else {
+        }
       }
     }
 
-    if (OB_FAIL(ret)) {
+    if (OB_ENTRY_NOT_EXIST == ret) {
+      // Slow path: the dict info is absent or its kv-cache entries were evicted.
+      // The expensive trie/DAT build must not run under the bucket write lock,
+      // otherwise every concurrent load_cache() reader starves behind it (this
+      // was profiled on the MATCH query hot path). dict_build_lock_ keeps at
+      // most one builder at a time, preserving the previous single-builder
+      // behavior.
+      TCWLockGuard build_guard(dict_build_lock_);
+
+      // double check: another builder may have published the dict meanwhile
+      {
+        ObBucketHashWLockGuard guard(rw_dict_lock_, key.hash());
+        ret = OB_SUCCESS;
+        if (OB_FAIL(get_dict_info(key, info))) {
+          if (OB_HASH_NOT_EXIST == ret) {
+            ret = OB_ENTRY_NOT_EXIST;
+          } else {
+          }
+        } else if (OB_FAIL(ObFTRangeDict::try_load_cache(desc, info.range_count_, container))) {
+          if (OB_ENTRY_NOT_EXIST == ret) {
+          } else {
+          }
+        }
+      }
+
       if (OB_ENTRY_NOT_EXIST == ret) {
+        container.reset();
         if (OB_FAIL(ObFTRangeDict::build_cache_from_ik_dict(desc, container))) {
+          STORAGE_FTS_LOG(WARN, "failed to build dict cache from ik dict", K(ret), K(desc.type_));
         } else if (FALSE_IT(info.range_count_ = container.get_handles().size())) {
-        } else if (OB_FAIL(put_dict_info(key, info))) {
+        } else {
+          // publish the rebuilt info under a short bucket write lock
+          ObBucketHashWLockGuard guard(rw_dict_lock_, key.hash());
+          if (OB_FAIL(put_dict_info(key, info))) {
+          }
         }
       }
     }

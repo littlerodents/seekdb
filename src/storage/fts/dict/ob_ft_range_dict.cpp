@@ -307,10 +307,30 @@ int ObFTRangeDict::init()
     ret = OB_INIT_TWICE;
   } else {
     if (OB_FAIL(build_dict_from_cache(*range_container_))) {
+    } else {
+      ranges_sorted_disjoint_ = check_ranges_sorted_disjoint();
     }
     is_inited_ = true;
   }
   return ret;
+}
+
+bool ObFTRangeDict::check_ranges_sorted_disjoint() const
+{
+  bool sorted_disjoint = true;
+  const ObCollationType cmp_type = ObCollationType::CS_TYPE_UTF8MB4_BIN;
+  for (int64_t i = 0; sorted_disjoint && i < range_dicts_.size(); ++i) {
+    // each range itself must be well formed: start_ <= end_
+    if (ObCharset::strcmp(cmp_type, range_dicts_[i].start_.get_word(), range_dicts_[i].end_.get_word()) > 0) {
+      sorted_disjoint = false;
+    }
+    // adjacent ranges must be strictly ordered with a gap (no overlap)
+    if (sorted_disjoint && i + 1 < range_dicts_.size()
+        && ObCharset::strcmp(cmp_type, range_dicts_[i].end_.get_word(), range_dicts_[i + 1].start_.get_word()) >= 0) {
+      sorted_disjoint = false;
+    }
+  }
+  return sorted_disjoint;
 }
 int ObFTRangeDict::build_ranges(const ObFTDictDesc &desc,
                                 ObIFTDictIterator &iter,
@@ -382,17 +402,40 @@ int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict 
 {
   int ret = OB_SUCCESS;
   bool found = false;
-  for (int i = 0; OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
-    if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                          range_dicts_[i].start_.get_word(),
-                          single_word)
-            <= 0
-        && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                             range_dicts_[i].end_.get_word(),
-                             single_word)
-               >= 0) {
-      dict = range_dicts_[i].dict_;
+  if (ranges_sorted_disjoint_) {
+    // Ranges are proven sorted and pairwise disjoint at init time, so the
+    // unique containing range (if any) can be located by binary search; this
+    // returns exactly the same result as the original linear scan below.
+    const ObCollationType cmp_type = ObCollationType::CS_TYPE_UTF8MB4_BIN;
+    int64_t low = 0;
+    int64_t high = range_dicts_.size() - 1;
+    while (low <= high) {
+      const int64_t mid = low + (high - low) / 2;
+      if (ObCharset::strcmp(cmp_type, range_dicts_[mid].start_.get_word(), single_word) <= 0) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    // high is now the last range whose start_ <= single_word, or -1
+    if (high >= 0
+        && ObCharset::strcmp(cmp_type, range_dicts_[high].end_.get_word(), single_word) >= 0) {
+      dict = range_dicts_[high].dict_;
       found = true;
+    }
+  } else {
+    for (int i = 0; OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
+      if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
+                            range_dicts_[i].start_.get_word(),
+                            single_word)
+              <= 0
+          && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
+                               range_dicts_[i].end_.get_word(),
+                               single_word)
+                 >= 0) {
+        dict = range_dicts_[i].dict_;
+        found = true;
+      }
     }
   }
   if (!found) {
