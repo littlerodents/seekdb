@@ -55,6 +55,7 @@ public:
   int merge_delta_endpoint(common::ObArenaAllocator &allocator, const ObIJsonBase &delta_endpoint);
   int deep_copy(common::ObIAllocator &allocator, const ObAiModelEndpointInfo &other);
   int check_valid() const;
+  static constexpr char OLLAMA_PROVIDER[] = "OLLAMA";
 
   const ObString &get_name() const { return name_; }
   const ObString &get_scope() const { return scope_; }

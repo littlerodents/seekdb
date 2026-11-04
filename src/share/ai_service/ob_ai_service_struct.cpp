@@ -31,6 +31,7 @@ namespace share
 const ObString ObAiModelEndpointInfo::DEFAULT_SCOPE = "ALL";
 
 const char *VALID_PROVIDERS[] = {
+  ObAiModelEndpointInfo::OLLAMA_PROVIDER,
   "ALIYUN-OPENAI",
   "ALIYUN-DASHSCOPE",
   "DEEPSEEK",
@@ -112,7 +113,8 @@ int ObAiModelEndpointInfo::check_valid() const
   } else if (url_.empty()) {
     ret = OB_AI_FUNC_PARAM_EMPTY;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("url"), "url");
-  } else if (access_key_.empty()) {
+  } else if (access_key_.empty() && provider_.case_compare(OLLAMA_PROVIDER) != 0) {
+    // ollama usually serves local models and does not require an access key
     ret = OB_AI_FUNC_PARAM_EMPTY;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("access_key"), "access_key");
     LOG_WARN("access_key is empty", K(ret), K(*this));
