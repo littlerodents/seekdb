@@ -112,6 +112,12 @@ protected:
 protected:
   UpdRtDef2DArray upd_rtdefs_;  //see the comment of UpdCtDef2DArray
   common::ObArrayWrap<ObInsRtDef> ins_rtdefs_;
+  // AI column maintenance buffers
+  bool ai_hook_active_;
+  uint64_t ai_hook_table_id_;
+  common::ObSEArray<common::ObString, 8> ai_pk_names_;
+  common::ObSEArray<common::ObString, 8> ai_rowkey_preds_;
+  common::ObSEArray<common::ObString, 8> ai_rowkey_encs_;
 };
 
 } // end namespace sql

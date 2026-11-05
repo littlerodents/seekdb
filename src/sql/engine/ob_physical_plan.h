@@ -282,6 +282,27 @@ public:
   int64_t get_das_dop() { return das_dop_; }
   void set_das_dop(int64_t v) { das_dop_ = v; }
 public:
+  // AI column strict-read references: parallel arrays of (table_id, column_name).
+  // Runtime-only; the strict check consults ai_column_strict_read at execution time.
+  bool has_ai_strict_refs() const { return !ai_strict_table_ids_.empty(); }
+  const common::ObIArray<uint64_t> &get_ai_strict_table_ids() const { return ai_strict_table_ids_; }
+  const common::ObIArray<common::ObString> &get_ai_strict_column_names() const { return ai_strict_column_names_; }
+  int add_ai_strict_ref(const uint64_t table_id, const common::ObString &column_name)
+  {
+    int ret = common::OB_SUCCESS;
+    for (int64_t i = 0; i < ai_strict_table_ids_.count(); ++i) {
+      if (ai_strict_table_ids_.at(i) == table_id
+          && 0 == ai_strict_column_names_.at(i).case_compare(column_name)) {
+        return ret;
+      }
+    }
+    common::ObString name_copy;
+    if (OB_FAIL(ob_write_string(get_allocator(), column_name, name_copy))) {
+    } else if (OB_FAIL(ai_strict_table_ids_.push_back(table_id))) {
+    } else if (OB_FAIL(ai_strict_column_names_.push_back(name_copy))) {
+    }
+    return ret;
+  }
   bool is_sample_time() { return 0 == stat_.execute_times_ % SAMPLE_TIMES; }
   void set_contain_index_location(bool exist) { contain_index_location_ = exist; }
   bool contain_index_location() const { return contain_index_location_; }
@@ -381,6 +402,9 @@ private:
   static const int64_t COMMON_SQL_EXPR_NUM = 256;
   static const int64_t COMMON_PARAM_NUM = 12;
   static const int64_t SAMPLE_TIMES = 10;
+private:
+  common::ObSEArray<uint64_t, 2> ai_strict_table_ids_;
+  common::ObSEArray<common::ObString, 2> ai_strict_column_names_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObPhysicalPlan);
 private:

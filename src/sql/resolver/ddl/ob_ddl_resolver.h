@@ -57,6 +57,7 @@ enum NUMCHILD {
   CREATE_TABLE_NUM_CHILD = 8,
   CREATE_TABLE_AS_SEL_NUM_CHILD = 11,
   COLUMN_DEFINITION_NUM_CHILD = 4,
+  AI_COLUMN_DEFINITION_NUM_CHILD = 5,
   COLUMN_DEF_NUM_CHILD = 3,
   INDEX_NUM_CHILD = 5,
   GEN_COLUMN_DEFINITION_NUM_CHILD = 7
@@ -519,6 +520,16 @@ protected:
       const bool is_create_table_as = false,
       const bool allow_has_default = true);
   int drop_not_null_constraint(const share::schema::ObColumnSchemaV2 &column);
+  // AI COLUMN clause: validate the definition and fill column.ai_info_
+  int resolve_ai_column_definition(share::schema::ObColumnSchemaV2 &column,
+                                   ParseNode *ai_node,
+                                   const ObTableSchema &table_schema);
+  // create the three hidden backing columns of an AI column
+  int add_ai_hidden_columns(ObTableSchema &table_schema,
+                            const share::schema::ObColumnSchemaV2 &ai_column);
+  // walk the input expression to make sure it only references existing non-AI columns
+  int validate_ai_input_expr_columns(const ParseNode *expr_node,
+                                     const ObTableSchema &table_schema);
   int resolve_normal_column_attribute_constr_not_null(ObColumnSchemaV2 &column,
                                                       ParseNode *attrs_node,
                                                       ObColumnResolveStat &resolve_stat);

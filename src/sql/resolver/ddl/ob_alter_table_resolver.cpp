@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "config_bridge.h"
 #include "sql/resolver/ddl/ob_alter_table_resolver.h"
+#include "share/schema/ob_ai_column_sql_service.h"
 #include "sql/resolver/expr/ob_raw_expr_part_expr_checker.h"
 #include "sql/resolver/dml/ob_delete_resolver.h"
 #include "sql/resolver/ddl/ob_index_builder_util.h"
@@ -424,6 +425,12 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
           break;
         }
         //deal with add column, alter column, drop column, change column, modify column
+        case T_AI_COLUMN_RETRY: {
+            if (OB_FAIL(resolve_ai_column_retry(*action_node))) {
+              SQL_RESV_LOG(WARN, "fail to resolve ai column retry action", K(ret));
+            }
+            break;
+          }
         case T_ALTER_COLUMN_OPTION: {
             alter_table_stmt->set_alter_table_column();
             bool temp_is_modify_column_visibility = false;
@@ -745,6 +752,157 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
       }
     }
     } // end for heap_vars_2.
+  }
+  return ret;
+}
+
+// Rewrite the unquoted STATUS pseudo column in a retry predicate into the physical
+// hidden-state CASE expression. Backquoted `status` and string literals are untouched.
+static int ob_rewrite_ai_retry_status(const ObString &predicate,
+                                      const ObString &state_column_name,
+                                      ObSqlString &rewritten)
+{
+  int ret = OB_SUCCESS;
+  const char *ptr = predicate.ptr();
+  const int64_t len = predicate.length();
+  int64_t i = 0;
+  int64_t last_flush = 0;
+  auto is_ident_char = [](char c) {
+    return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9')
+        || '_' == c || '$' == c || (c & 0x80);
+  };
+  while (OB_SUCC(ret) && i < len) {
+    const char c = ptr[i];
+    if ('\'' == c) {
+      // skip string literal with '' escaping
+      ++i;
+      while (i < len) {
+        if ('\'' == ptr[i]) {
+          if (i + 1 < len && '\'' == ptr[i + 1]) {
+            i += 2;
+          } else {
+            ++i;
+            break;
+          }
+        } else if ('\\' == ptr[i] && i + 1 < len) {
+          i += 2;
+        } else {
+          ++i;
+        }
+      }
+    } else if ('`' == c) {
+      // skip backquoted identifier
+      ++i;
+      while (i < len && '`' != ptr[i]) { ++i; }
+      if (i < len) { ++i; }
+    } else if ('"' == c) {
+      ++i;
+      while (i < len && '"' != ptr[i]) { ++i; }
+      if (i < len) { ++i; }
+    } else if (is_ident_char(c)) {
+      int64_t word_begin = i;
+      while (i < len && is_ident_char(ptr[i])) { ++i; }
+      const int64_t word_len = i - word_begin;
+      if (6 == word_len && 0 == ObString(word_len, ptr + word_begin).case_compare("status")) {
+        if (OB_FAIL(rewritten.append(ptr + last_flush, word_begin - last_flush))) {
+        } else if (OB_FAIL(rewritten.append_fmt(
+            "(CASE WHEN `%.*s` = 2 THEN 'READY' WHEN `%.*s` = 4 THEN 'FAILED' "
+            "WHEN `%.*s` IS NULL THEN 'PENDING' ELSE 'PENDING' END)",
+            static_cast<int>(state_column_name.length()), state_column_name.ptr(),
+            static_cast<int>(state_column_name.length()), state_column_name.ptr(),
+            static_cast<int>(state_column_name.length()), state_column_name.ptr()))) {
+        } else {
+          last_flush = i;
+        }
+      }
+    } else {
+      ++i;
+    }
+  }
+  if (OB_SUCC(ret) && OB_FAIL(rewritten.append(ptr + last_flush, len - last_flush))) {
+  }
+  return ret;
+}
+
+int ObAlterTableResolver::resolve_ai_column_retry(const ParseNode &node)
+{
+  int ret = OB_SUCCESS;
+  ObAlterTableStmt *alter_table_stmt = get_alter_table_stmt();
+  ParseNode *column_node = NULL;
+  ParseNode *where_node = NULL;
+  if (OB_ISNULL(alter_table_stmt) || OB_ISNULL(table_schema_)
+      || T_AI_COLUMN_RETRY != node.type_
+      || OB_ISNULL(node.children_)
+      || OB_ISNULL(column_node = node.children_[0])
+      || OB_ISNULL(column_node->str_value_)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid ai column retry node", K(ret));
+  } else {
+    // this action must stand alone
+    if (alter_table_stmt->get_alter_table_action_count() > 1) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
+    } else {
+      where_node = node.children_[1];
+      ObString column_name(static_cast<int32_t>(column_node->str_len_), column_node->str_value_);
+      const ObColumnSchemaV2 *column_schema = table_schema_->get_column_schema(column_name);
+      if (OB_ISNULL(column_schema) || !column_schema->is_ai_column()) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
+      } else {
+        const ObAIColumnInfo *ai_info = table_schema_->get_ai_column_by_column_id(column_schema->get_column_id());
+        ObSqlString state_name;
+        ObSqlString request_name;
+        ObSqlString result_spec_name;
+        if (OB_ISNULL(ai_info)) {
+          ret = OB_ERR_UNEXPECTED;
+          SQL_RESV_LOG(WARN, "ai column info missing", K(ret), K(column_name));
+        } else if (OB_FAIL(share::schema::ObAIColumnSqlService::hidden_ai_column_names(
+                column_name, state_name, request_name, result_spec_name))) {
+          SQL_RESV_LOG(WARN, "fail to build hidden column names", K(ret));
+        } else {
+          ObSqlString predicate;
+          if (OB_NOT_NULL(where_node) && OB_NOT_NULL(where_node->str_value_)
+              && where_node->str_len_ > 0) {
+            ObString where_text(static_cast<int32_t>(where_node->str_len_), where_node->str_value_);
+            // strip the leading WHERE keyword
+            int64_t begin = 0;
+            while (begin < where_text.length() && isspace(where_text[begin])) { ++begin; }
+            ObString head(5, where_text.ptr() + begin);
+            if (5 == head.length() && 0 == head.case_compare("where")) {
+              begin += 5;
+            }
+            while (begin < where_text.length() && isspace(where_text[begin])) { ++begin; }
+            ObString pred(where_text.length() - begin, where_text.ptr() + begin);
+            ObString state_col_name(static_cast<int32_t>(state_name.length()), state_name.ptr());
+            if (OB_FAIL(ob_rewrite_ai_retry_status(pred, state_col_name, predicate))) {
+              SQL_RESV_LOG(WARN, "fail to rewrite status pseudo column", K(ret));
+            }
+          } else {
+            // no predicate: all rows
+          }
+          if (OB_SUCC(ret)) {
+            common::ObString column_name_saved;
+            common::ObString predicate_saved;
+            if (OB_ISNULL(allocator_)) {
+              ret = OB_ERR_UNEXPECTED;
+            } else if (OB_FAIL(ob_write_string(*allocator_, column_name, column_name_saved))) {
+              SQL_RESV_LOG(WARN, "fail to copy ai retry column name", K(ret));
+            } else if (OB_FAIL(ob_write_string(*allocator_, predicate.string(), predicate_saved))) {
+              SQL_RESV_LOG(WARN, "fail to copy ai retry predicate", K(ret));
+            } else {
+              alter_table_stmt->set_ai_column_retry(true);
+              alter_table_stmt->set_ai_retry_table_id(table_schema_->get_table_id());
+              alter_table_stmt->set_ai_retry_column_name(column_name_saved);
+              alter_table_stmt->set_ai_retry_predicate(predicate_saved);
+              alter_table_stmt->get_alter_table_arg().ddl_stmt_str_ = ObString();
+              SQL_RESV_LOG(INFO, "resolved ai column retry",
+                           K(column_name), K(predicate), K(state_name));
+            }
+          }
+        }
+      }
+    }
   }
   return ret;
 }
@@ -3459,6 +3617,46 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
           } else if (FALSE_IT(alter_table_stmt->set_sql_mode(session_info_->get_sql_mode()))) {
           }
         }
+
+        // add hidden backing columns of an AI column
+        if (OB_SUCC(ret) && alter_column_schema.is_ai_column()) {
+          AlterColumnSchema hidden_schema;
+          ObSqlString state_name;
+          ObSqlString request_name;
+          ObSqlString result_spec_name;
+          if (OB_FAIL(share::schema::ObAIColumnSqlService::hidden_ai_column_names(
+                  alter_column_schema.get_column_name_str(),
+                  state_name, request_name, result_spec_name))) {
+            SQL_RESV_LOG(WARN, "fail to build hidden ai column names", K(ret));
+          } else {
+            const int64_t hidden_len = 65535;
+            for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
+              hidden_schema.reset();
+              hidden_schema.alter_type_ = OB_DDL_ADD_COLUMN;
+              hidden_schema.set_data_type(0 == i ? ObIntType : ObVarcharType);
+              hidden_schema.set_nullable(true);
+              hidden_schema.set_is_hidden(true);
+              if (0 == i) {
+                hidden_schema.set_charset_type(CHARSET_BINARY);
+                hidden_schema.set_collation_type(CS_TYPE_BINARY);
+              } else {
+                hidden_schema.set_charset_type(ObCharset::get_default_charset());
+                hidden_schema.set_collation_type(
+                    ObCharset::get_default_collation(ObCharset::get_default_charset()));
+                ObAccuracy acc;
+                acc.set_length(static_cast<ObLength>(hidden_len));
+                hidden_schema.set_accuracy(acc);
+              }
+              if (OB_FAIL(hidden_schema.set_column_name(0 == i ? state_name.ptr()
+                                                       : (1 == i ? request_name.ptr()
+                                                                 : result_spec_name.ptr())))) {
+                SQL_RESV_LOG(WARN, "fail to set hidden ai column name", K(ret));
+              } else if (OB_FAIL(alter_table_stmt->add_column(hidden_schema))) {
+                SQL_RESV_LOG(WARN, "fail to add hidden ai column", K(ret));
+              }
+            }
+          }
+        }
       }
     }
     add_column_cnt_++;
@@ -3544,6 +3742,9 @@ int ObAlterTableResolver::resolve_alter_table_column_definition(AlterColumnSchem
     if (OB_UNLIKELY(GEN_COLUMN_DEFINITION_NUM_CHILD == node->num_child_)) {
     // generated column with pos_column
       pos_node = node->children_[5];
+    } else if (OB_UNLIKELY(AI_COLUMN_DEFINITION_NUM_CHILD == node->num_child_)) {
+    // ai column with pos_column
+      pos_node = node->children_[4];
     } else {
       // normal column with pos_column
       pos_node = node->children_[3];

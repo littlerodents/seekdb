@@ -158,6 +158,8 @@ int ObLocalManagementService::init(ObConfigManager &config_mgr,
     FLOG_WARN("init local deadlock event clear task timer failed", KR(ret));
   } else if (OB_FAIL(purge_recyclebin_task_timer_.init("LocalRecycle", ObMemAttr("LocalRecycle")))) {
     FLOG_WARN("init local purge recyclebin task timer failed", KR(ret));
+  } else if (OB_FAIL(ai_column_worker_.init(&sql_proxy_, schema_service))) {
+    FLOG_WARN("init ai column worker failed", KR(ret));
   } else if (OB_FAIL(root_minor_freeze_.init())) {
     // init root minor freeze
     FLOG_WARN("init root_minor_freeze_ failed", KR(ret));
@@ -1933,6 +1935,12 @@ int ObLocalManagementService::start_timer_tasks()
     }
   }
 
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(ai_column_worker_.start())) {
+      LOG_WARN("fail to start ai column worker", K(ret));
+    }
+  }
+
   LOG_INFO("start all timer tasks finish", K(ret));
   return ret;
 }
@@ -1946,6 +1954,7 @@ int ObLocalManagementService::stop_timer_tasks()
     load_ddl_task_timer_.cancel_task(load_ddl_task_);
     deadlock_event_clear_task_timer_.cancel_task(deadlock_event_clear_task_);
     purge_recyclebin_task_timer_.cancel_task(purge_recyclebin_task_);
+    ai_column_worker_.stop();
   }
 
   //stop other timer tasks here

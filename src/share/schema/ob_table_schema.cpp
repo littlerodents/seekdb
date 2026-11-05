@@ -1304,6 +1304,10 @@ int ObTableSchema::assign(const ObTableSchema &src_schema)
         }
       }
       if (OB_SUCC(ret)) {
+        if (OB_FAIL(assign_ai_columns(src_schema.get_ai_columns()))) {
+        }
+      }
+      if (OB_SUCC(ret)) {
         if (OB_FAIL(set_foreign_key_infos(src_schema.get_foreign_key_infos()))) {
         }
       }
@@ -2567,6 +2571,8 @@ void ObTableSchema::reset()
 
   depend_table_ids_.reset();
   depend_mock_fk_parent_table_ids_.reset();
+
+  ai_columns_.reset();
 
   column_cnt_ = 0;
   column_array_capacity_ = 0;
@@ -6179,6 +6185,59 @@ int ObTableSchema::remove_cst_from_cst_array(const ObConstraint *cst)
   }
 
   return ret;
+}
+
+int ObTableSchema::add_ai_column(const ObAIColumnInfo &ai_info)
+{
+  int ret = OB_SUCCESS;
+  ObAIColumnInfo dst;
+  dst.table_id_ = ai_info.table_id_;
+  dst.column_id_ = ai_info.column_id_;
+  dst.state_column_id_ = ai_info.state_column_id_;
+  dst.request_column_id_ = ai_info.request_column_id_;
+  dst.result_spec_column_id_ = ai_info.result_spec_column_id_;
+  dst.max_retries_ = ai_info.max_retries_;
+  dst.embed_dim_ = ai_info.embed_dim_;
+  if (OB_FAIL(deep_copy_str(ai_info.column_name_, dst.column_name_))) {
+    LOG_WARN("fail to deep copy ai column name", K(ret));
+  } else if (OB_FAIL(deep_copy_str(ai_info.normalized_expr_, dst.normalized_expr_))) {
+    LOG_WARN("fail to deep copy ai column normalized expr", K(ret));
+  } else if (OB_FAIL(deep_copy_str(ai_info.type_prompt_, dst.type_prompt_))) {
+    LOG_WARN("fail to deep copy ai column type prompt", K(ret));
+  } else if (OB_FAIL(deep_copy_str(ai_info.ai_model_name_, dst.ai_model_name_))) {
+    LOG_WARN("fail to deep copy ai model name", K(ret));
+  } else if (OB_FAIL(deep_copy_str(ai_info.ai_func_, dst.ai_func_))) {
+    LOG_WARN("fail to deep copy ai func", K(ret));
+  } else if (OB_FAIL(deep_copy_str(ai_info.sync_mode_, dst.sync_mode_))) {
+    LOG_WARN("fail to deep copy sync mode", K(ret));
+  } else if (OB_FAIL(ai_columns_.push_back(dst))) {
+    LOG_WARN("fail to push back ai column info", K(ret));
+  }
+  return ret;
+}
+
+int ObTableSchema::assign_ai_columns(const common::ObIArray<ObAIColumnInfo> &ai_columns)
+{
+  int ret = OB_SUCCESS;
+  ai_columns_.reset();
+  for (int64_t i = 0; OB_SUCC(ret) && i < ai_columns.count(); ++i) {
+    if (OB_FAIL(add_ai_column(ai_columns.at(i)))) {
+      LOG_WARN("fail to add ai column info", K(ret), K(i));
+    }
+  }
+  return ret;
+}
+
+const ObAIColumnInfo *ObTableSchema::get_ai_column_by_column_id(const uint64_t column_id) const
+{
+  const ObAIColumnInfo *ret_info = NULL;
+  for (int64_t i = 0; i < ai_columns_.count(); ++i) {
+    if (ai_columns_.at(i).column_id_ == column_id) {
+      ret_info = &ai_columns_.at(i);
+      break;
+    }
+  }
+  return ret_info;
 }
 
 int ObTableSchema::add_constraint(const ObConstraint &constraint)

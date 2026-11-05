@@ -23,6 +23,7 @@
 #include "lib/hash/ob_hashmap.h"
 #include "share/schema/ob_schema_struct.h"
 #include "share/schema/ob_schema_utils.h"
+#include "share/schema/ob_ai_column_info.h"
 #include "common/rowkey/ob_rowkey_info.h"
 
 namespace oceanbase
@@ -69,6 +70,10 @@ int assign(const ObColumnSchemaV2 &src_schema);
 //set methods
   
   inline void set_table_id(const uint64_t id) { table_id_ = id; }
+  inline bool is_ai_column() const { return is_ai_column_; }
+  inline void set_ai_column(bool v) { is_ai_column_ = v; }
+  inline const ObAIColumnInfo &get_ai_info() const { return ai_info_; }
+  inline ObAIColumnInfo &get_ai_info_for_update() { return ai_info_; }
   inline void set_column_id(const uint64_t id) { column_id_ = id; }
   inline void set_schema_version(const int64_t schema_version) { schema_version_ = schema_version; }
   inline void set_rowkey_position(const int64_t rowkey_position) { rowkey_position_ = rowkey_position; }
@@ -370,6 +375,9 @@ private:
   bool is_zero_fill_;
   bool is_autoincrement_;
   bool is_hidden_;
+  // AI column runtime marker (not persisted; used between DDL resolver and SQL service)
+  bool is_ai_column_;
+  ObAIColumnInfo ai_info_;
   int64_t column_flags_;
   ColumnReferenceSet *column_ref_idxs_;
   common::ObCharsetType charset_type_;//default:utf8mb4

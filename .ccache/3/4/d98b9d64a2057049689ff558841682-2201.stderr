@@ -1,0 +1,37 @@
+conftest.c:158:24: warning: address of 's' will always evaluate to 'true' [-Wpointer-bool-conversion]
+  158 |              bool e = &s;
+      |                   ~    ^
+conftest.c:163:40: warning: address of array 'p' will always evaluate to 'true' [-Wpointer-bool-conversion]
+  163 |                      + !m + !n + !o + !p + !q + !pq);
+      |                                       ~^
+conftest.c:163:35: warning: address of array 'o' will always evaluate to 'true' [-Wpointer-bool-conversion]
+  163 |                      + !m + !n + !o + !p + !q + !pq);
+      |                                  ~^
+conftest.c:163:30: warning: address of array 'n' will always evaluate to 'true' [-Wpointer-bool-conversion]
+  163 |                      + !m + !n + !o + !p + !q + !pq);
+      |                             ~^
+conftest.c:162:63: warning: address of array 'i' will always evaluate to 'true' [-Wpointer-bool-conversion]
+  162 |              return (!a + !b + !c + !d + !e + !f + !g + !h + !i + !!j + !k + !!l
+      |                                                              ~^
+conftest.c:162:58: warning: address of array 'h' will always evaluate to 'true' [-Wpointer-bool-conversion]
+  162 |              return (!a + !b + !c + !d + !e + !f + !g + !h + !i + !!j + !k + !!l
+      |                                                         ~^
+conftest.c:162:53: warning: address of array 'g' will always evaluate to 'true' [-Wpointer-bool-conversion]
+  162 |              return (!a + !b + !c + !d + !e + !f + !g + !h + !i + !!j + !k + !!l
+      |                                                    ~^
+conftest.c:162:48: warning: address of array 'f' will always evaluate to 'true' [-Wpointer-bool-conversion]
+  162 |              return (!a + !b + !c + !d + !e + !f + !g + !h + !i + !!j + !k + !!l
+      |                                               ~^
+conftest.c:162:38: warning: address of array 'd' will always evaluate to 'true' [-Wpointer-bool-conversion]
+  162 |              return (!a + !b + !c + !d + !e + !f + !g + !h + !i + !!j + !k + !!l
+      |                                     ~^
+conftest.c:162:33: warning: address of array 'c' will always evaluate to 'true' [-Wpointer-bool-conversion]
+  162 |              return (!a + !b + !c + !d + !e + !f + !g + !h + !i + !!j + !k + !!l
+      |                                ~^
+conftest.c:162:28: warning: address of array 'b' will always evaluate to 'true' [-Wpointer-bool-conversion]
+  162 |              return (!a + !b + !c + !d + !e + !f + !g + !h + !i + !!j + !k + !!l
+      |                           ~^
+conftest.c:162:23: warning: address of array 'a' will always evaluate to 'true' [-Wpointer-bool-conversion]
+  162 |              return (!a + !b + !c + !d + !e + !f + !g + !h + !i + !!j + !k + !!l
+      |                      ~^
+12 warnings generated.

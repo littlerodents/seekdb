@@ -19,6 +19,7 @@
 #include "config_bridge.h"
 #include "ob_table_update_op.h"
 #include "sql/engine/dml/ob_dml_service.h"
+#include "sql/engine/dml/ob_ai_column_dml_service.h"
 
 namespace oceanbase
 {
@@ -199,7 +200,20 @@ OB_INLINE int ObTableUpdateOp::inner_open_with_das()
 OB_INLINE int ObTableUpdateOp::open_table_for_each()
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(upd_rtdefs_.allocate_array(ctx_.get_allocator(), MY_SPEC.upd_ctdefs_.count()))) {
+  ai_hook_active_ = false;
+  ai_pk_names_.reset();
+  ai_rowkey_preds_.reset();
+  ai_rowkey_encs_.reset();
+  if (OB_UNLIKELY(MY_SPEC.upd_ctdefs_.count() > 0 && !MY_SPEC.upd_ctdefs_.at(0).empty())) {
+    const ObUpdCtDef &primary_ctdef = *MY_SPEC.upd_ctdefs_.at(0).at(0);
+    ai_hook_table_id_ = primary_ctdef.das_ctdef_.table_id_;
+    if (OB_FAIL(ObAIColumnDMLService::on_write_op_open(ctx_, ai_hook_table_id_,
+                                                       ai_pk_names_, ai_hook_active_))) {
+      LOG_WARN("fail to activate ai column hook", K(ret));
+    }
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(upd_rtdefs_.allocate_array(ctx_.get_allocator(), MY_SPEC.upd_ctdefs_.count()))) {
   }
   trigger_clear_exprs_.reset();
   fk_checkers_.reset();
@@ -332,6 +346,12 @@ OB_INLINE int ObTableUpdateOp::update_row_to_das()
       } else if (OB_FAIL(calc_tablet_loc(upd_ctdef, upd_rtdef, old_tablet_loc, new_tablet_loc))) {
       } else if (OB_FAIL(ObDMLService::update_row(upd_ctdef, upd_rtdef, old_tablet_loc, new_tablet_loc, dml_rtctx_,
                                                  modify_row.old_row_, modify_row.new_row_, modify_row.full_row_))) {
+      } else if (ai_hook_active_ && 0 == j
+                 && OB_FAIL(ObAIColumnDMLService::collect_written_rowkey(
+                     ctx_.get_allocator(), eval_ctx_, ai_pk_names_,
+                     upd_ctdef.full_row_, upd_ctdef.das_ctdef_.rowkey_cnt_,
+                     ai_rowkey_preds_, ai_rowkey_encs_))) {
+        LOG_WARN("fail to collect rowkey for ai column maintenance", K(ret));
       } else if (need_after_row_process(upd_ctdef) && OB_FAIL(dml_modify_rows_.push_back(modify_row))) {
       } else {
         ++upd_rtdef.found_rows_;
@@ -411,6 +431,14 @@ int ObTableUpdateOp::check_update_affected_row()
 int ObTableUpdateOp::write_rows_post_proc(int last_errno)
 {
   int ret = last_errno;
+  if (OB_SUCC(ret) && iter_end_ && ai_hook_active_ && !ai_rowkey_preds_.empty()) {
+    if (OB_FAIL(submit_all_dml_task())) {
+      LOG_WARN("fail to flush dml tasks before ai maintenance", K(ret));
+    } else if (OB_FAIL(ObAIColumnDMLService::finish_write(ctx_, ai_hook_table_id_,
+            false /*not delete*/, false /*update*/, ai_rowkey_preds_, ai_rowkey_encs_))) {
+      LOG_WARN("fail to run ai column maintenance on update", K(ret));
+    }
+  }
   if (iter_end_) {
     ObPhysicalPlanCtx *plan_ctx = GET_PHY_PLAN_CTX(ctx_);
     ObSQLSessionInfo *session = GET_MY_SESSION(ctx_);
