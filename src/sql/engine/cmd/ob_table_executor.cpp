@@ -41,6 +41,7 @@
 #include "sql/engine/cmd/ob_partition_executor_utils.h"
 
 #include "sql/printer/ob_select_stmt_printer.h"
+#include "sql/engine/dml/ob_ai_column_dml_service.h"
 #include "share/ob_structured_event_logger.h"
 namespace oceanbase
 {
@@ -762,6 +763,15 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
   OV (OB_NOT_NULL(task_exec_ctx = GET_SQL_EXECUTOR_CTX(ctx)), OB_NOT_INIT);
   if (OB_FAIL(ret)) {
     // do nothing
+  } else if (stmt.is_ai_column_retry()) {
+    // RETRY AI COLUMN is executed locally through nested SQL on the user session;
+    // no root-service DDL is involved.
+    if (OB_FAIL(ObAIColumnDMLService::execute_ai_column_retry(ctx,
+            stmt.get_ai_retry_table_id(),
+            stmt.get_ai_retry_column_name(),
+            stmt.get_ai_retry_predicate()))) {
+      LOG_WARN("fail to execute ai column retry", K(ret));
+    }
   } else if (stmt.is_alter_triggers()) {
     if (stmt.get_tg_arg().trigger_infos_.count() > 0) {
       stmt.get_tg_arg().ddl_stmt_str_ = first_stmt;

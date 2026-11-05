@@ -362,6 +362,8 @@ private:
   int add_columns_dml(const ObTableSchema &table,
       share::ObDMLSqlSplicer &all_column_dml,
       int64_t &column_count);
+  int batch_add_ai_columns_for_create_table(common::ObISQLClient &sql_client,
+      const common::ObIArray<ObTableSchema> &tables);
   int batch_add_columns_for_create_table(common::ObISQLClient &sql_client,
       const ObIArray<ObTableSchema> &table);
   int add_columns_for_core(common::ObISQLClient &sql_client, const ObTableSchema &table);

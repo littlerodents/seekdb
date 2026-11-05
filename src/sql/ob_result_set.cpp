@@ -27,6 +27,7 @@
 #include "sql/monitor/show_trace/ob_show_trace.h"
 #include "sql/engine/table/ob_table_scan_op.h"
 #include "share/ob_ddl_checksum.h"
+#include "sql/engine/dml/ob_ai_column_dml_service.h"
 
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
@@ -197,12 +198,30 @@ int ObResultSet::execute()
 //  if (stmt::T_PREPARE != stmt_type_
 //      && stmt::T_DEALLOCATE != stmt_type_) {
     if (NULL != physical_plan_) {
+      // AI column strict read: reject statements referencing an AI column whose table
+      // still has unfinished rows, before the plan starts running.
+      if (physical_plan_->has_ai_strict_refs()) {
+        bool strict_read = false;
+        if (OB_FAIL(my_session_.get_sys_variable(share::SYS_VAR_AI_COLUMN_STRICT_READ, strict_read))) {
+          LOG_WARN("fail to read ai_column_strict_read", K(ret));
+        } else if (strict_read) {
+          if (OB_FAIL(sql::ObAIColumnDMLService::check_strict_read(get_exec_context(),
+                  physical_plan_->get_ai_strict_table_ids(),
+                  physical_plan_->get_ai_strict_column_names()))) {
+            LOG_DEBUG("ai column strict read rejected the statement", K(ret));
+          }
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+    if (NULL != physical_plan_) {
       ret = open_plan();
     } else if (NULL != cmd_) {
       ret = open_cmd();
     } else {
       // inner sql executor, no plan or cmd. do nothing.
     }
+    } // end strict-read guard
 //  } else {
 //    //T_PREPARE//T_DEALLOCATE do nothing
 //  }

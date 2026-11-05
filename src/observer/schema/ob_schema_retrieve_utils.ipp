@@ -192,6 +192,20 @@ int ObSchemaRetrieveUtils::retrieve_constraint(const bool check_deleted,
   return ret;
 }
 
+template<typename T>
+int ObSchemaRetrieveUtils::retrieve_ai_column_info(const bool check_deleted,
+    T &result,
+    ObArray<ObTableSchema *> &table_schema_array)
+{
+  int ret = common::OB_SUCCESS;
+  if (OB_FAIL((retrieve_schema<ObTableSchema, ObAIColumnInfo>(
+                                          check_deleted,
+                                          result,
+                                          table_schema_array)))) {
+  }
+  return ret;
+}
+
 template<typename TABLE_SCHEMA, typename T>
 int ObSchemaRetrieveUtils::retrieve_part_info(const bool check_deleted,
     T &result,
@@ -301,6 +315,30 @@ int ObSchemaRetrieveHelperBase<TABLE_SCHEMA, ObConstraint>::add_schema(
     TABLE_SCHEMA &table_schema, ObConstraint &p)
 {
   return table_schema.add_constraint(p);
+}
+
+template<typename TABLE_SCHEMA>
+int64_t ObSchemaRetrieveHelperBase<TABLE_SCHEMA, ObAIColumnInfo>::get_schema_id(const ObAIColumnInfo &p)
+{
+  return static_cast<int64_t>(p.column_id_);
+}
+
+template<typename TABLE_SCHEMA>
+int ObSchemaRetrieveHelperBase<TABLE_SCHEMA, ObAIColumnInfo>::add_schema(
+    TABLE_SCHEMA &table_schema, ObAIColumnInfo &p)
+{
+  return table_schema.add_ai_column(p);
+}
+
+template<typename TABLE_SCHEMA>
+template<typename T>
+int ObSchemaRetrieveHelperBase<TABLE_SCHEMA, ObAIColumnInfo>::fill_current(
+    const bool check_deleted,
+    T &result, ObAIColumnInfo &p,
+    bool &is_deleted)
+{
+  return ObSchemaRetrieveUtils::fill_ai_column_info(check_deleted,
+                                                    result, p, is_deleted);
 }
 
 template<typename TABLE_SCHEMA>
@@ -1105,6 +1143,35 @@ int ObSchemaRetrieveUtils::fill_constraint(const bool check_deleted, T &result,
     EXTRACT_INT_FIELD_TO_CLASS_MYSQL_WITH_DEFAULT_VALUE(result, name_generated_type, constraint, ObNameGeneratedType, true/*skip null*/, true/*ignore column error*/, GENERATED_TYPE_UNKNOWN);
   }
 
+  return ret;
+}
+
+template<typename T>
+int ObSchemaRetrieveUtils::fill_ai_column_info(const bool check_deleted, T &result,
+    ObAIColumnInfo &ai_info, bool &is_deleted)
+{
+  int ret = common::OB_SUCCESS;
+  ai_info.reset();
+  is_deleted = false;
+  const int64_t default_max_retries = 2;
+  const int64_t default_embed_dim = -1;
+  EXTRACT_INT_FIELD_TO_CLASS_MYSQL(result, table_id, ai_info, int64_t);
+  EXTRACT_INT_FIELD_TO_CLASS_MYSQL(result, column_id, ai_info, uint64_t);
+  if (check_deleted) {
+    EXTRACT_INT_FIELD_MYSQL(result, "is_deleted", is_deleted, bool);
+  }
+  if (!is_deleted) {
+    EXTRACT_INT_FIELD_TO_CLASS_MYSQL(result, state_column_id, ai_info, uint64_t);
+    EXTRACT_INT_FIELD_TO_CLASS_MYSQL(result, request_column_id, ai_info, uint64_t);
+    EXTRACT_INT_FIELD_TO_CLASS_MYSQL(result, result_spec_column_id, ai_info, uint64_t);
+    EXTRACT_INT_FIELD_TO_CLASS_MYSQL_WITH_DEFAULT_VALUE(result, max_retries, ai_info, int64_t, true, true, default_max_retries);
+    EXTRACT_INT_FIELD_TO_CLASS_MYSQL_WITH_DEFAULT_VALUE(result, embed_dim, ai_info, int64_t, true, true, default_embed_dim);
+    EXTRACT_VARCHAR_FIELD_TO_CLASS_MYSQL(result, column_name, ai_info);
+    EXTRACT_VARCHAR_FIELD_TO_CLASS_MYSQL(result, normalized_expr, ai_info);
+    EXTRACT_VARCHAR_FIELD_TO_CLASS_MYSQL(result, ai_model_name, ai_info);
+    EXTRACT_VARCHAR_FIELD_TO_CLASS_MYSQL(result, ai_func, ai_info);
+    EXTRACT_VARCHAR_FIELD_TO_CLASS_MYSQL(result, sync_mode, ai_info);
+  }
   return ret;
 }
 

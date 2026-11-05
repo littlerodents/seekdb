@@ -84,6 +84,19 @@ public:
 };
 
 template<typename TABLE_SCHEMA>
+class ObSchemaRetrieveHelperBase<TABLE_SCHEMA, ObAIColumnInfo>
+{
+public:
+  static int64_t get_schema_id(const ObAIColumnInfo &s);
+  template<typename T>
+  static int fill_current(
+      const bool check_deleted,
+      T &result, ObAIColumnInfo &p,
+      bool &is_deleted);
+  static int add_schema(TABLE_SCHEMA &table_schema, ObAIColumnInfo &schema);
+};
+
+template<typename TABLE_SCHEMA>
 class ObSchemaRetrieveHelperBase<TABLE_SCHEMA, ObPartition>
 {
 public:
@@ -289,6 +302,11 @@ public:
                                  common::ObArray<ObTableSchema *> &table_schema_array);
 
   template<typename T>
+  static int retrieve_ai_column_info(const bool check_deleted,
+                                     T &result,
+                                     common::ObArray<ObTableSchema *> &table_schema_array);
+
+  template<typename T>
   static int retrieve_constraint_column_info(T &result, ObConstraint *&cst);
 
   template<typename T>
@@ -473,6 +491,10 @@ public:
   template<typename T>
   static int fill_constraint(const bool check_deleted, T &result,
                              ObConstraint &constraint, bool &is_deleted);
+
+  template<typename T>
+  static int fill_ai_column_info(const bool check_deleted, T &result,
+                                 ObAIColumnInfo &ai_info, bool &is_deleted);
 
   template<typename T>
   static int fill_constraint_column_info(T &result, uint64_t &column_id, bool &is_deleted);

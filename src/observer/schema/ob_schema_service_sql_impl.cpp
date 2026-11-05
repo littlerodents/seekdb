@@ -37,7 +37,9 @@
 #define FETCH_ALL_TABLE_HISTORY_SQL             COMMON_SCHEMA_SQL
 #define FETCH_ALL_COLUMN_SQL                    COMMON_SCHEMA_SQL
 #define FETCH_ALL_COLUMN_HISTORY_SQL            COMMON_SCHEMA_SQL
-#define FETCH_ALL_CONSTRAINT_SQL                COMMON_SCHEMA_SQL
+#define FETCH_ALL_AI_COLUMN_SQL                  COMMON_SCHEMA_SQL
+#define FETCH_ALL_AI_COLUMN_HISTORY_SQL          COMMON_SCHEMA_SQL
+#define FETCH_ALL_CONSTRAINT_SQL                 COMMON_SCHEMA_SQL
 #define FETCH_ALL_CONSTRAINT_HISTORY_SQL        COMMON_SCHEMA_SQL
 #define FETCH_ALL_DATABASE_HISTORY_SQL          COMMON_SCHEMA_SQL
 #define FETCH_ALL_USER_HISTORY_SQL              COMMON_SCHEMA_SQL
@@ -722,6 +724,10 @@ int ObSchemaServiceSQLImpl::get_not_core_table_schemas(
                                                                            sql_client, not_core_schemas,
                                                                            &non_dependency_table_ids.at(0),
                                                                            non_dependency_table_ids.count()))) {
+        } else if (!GCTX.in_bootstrap_
+                   && OB_FAIL(fetch_all_ai_column_info(schema_status, schema_version,
+                                                       sql_client, not_core_schemas,
+                                                       &table_ids.at(begin), end - begin))) {
         }
       }
       begin = end;
@@ -1368,6 +1374,68 @@ int ObSchemaServiceSQLImpl::fetch_all_column_info(
       } else if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
         ret = OB_ERR_UNEXPECTED;
       } else if (OB_FAIL(ObSchemaRetrieveUtils::retrieve_column_schema(check_deleted, *result, table_schema_array))) {
+      }
+    }
+  }
+  return ret;
+}
+
+int ObSchemaServiceSQLImpl::fetch_all_ai_column_info(
+    const ObRefreshSchemaStatus &schema_status,
+    const int64_t schema_version,
+    ObISQLClient &sql_client,
+    ObArray<ObTableSchema *> &table_schema_array,
+    const uint64_t *table_ids /* = NULL */,
+    const int64_t table_ids_size /*= 0 */)
+{
+  int ret = OB_SUCCESS;
+  ObMySQLResult *result = NULL;
+  ObSqlString sql;
+  const int64_t snapshot_timestamp = schema_status.snapshot_timestamp_;
+
+  DEFINE_SQL_CLIENT_RETRY_WEAK_WITH_SNAPSHOT(sql_client, snapshot_timestamp);
+
+  if (OB_SUCC(ret)) {
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      if (INT64_MAX == schema_version) {
+        if (OB_FAIL(sql.append_fmt(FETCH_ALL_AI_COLUMN_SQL, OB_ALL_AI_COLUMN_TNAME))) {
+        } else {
+          if (NULL != table_ids && table_ids_size > 0) {
+            if (OB_FAIL(sql.append_fmt(" AND table_id IN "))) {
+            } else if (OB_FAIL(sql_append_pure_ids(schema_status, table_ids, table_ids_size, sql))) {
+            }
+          }
+          if (FAILEDx(sql.append_fmt(" ORDER BY TABLE_ID, COLUMN_ID"))) {
+          }
+        }
+      } else {
+        if (OB_FAIL(sql.append_fmt(FETCH_ALL_AI_COLUMN_HISTORY_SQL, OB_ALL_AI_COLUMN_HISTORY_TNAME,
+                                   OB_INVALID_RUNTIME_ID))) {
+        } else {
+          if (NULL != table_ids && table_ids_size > 0) {
+            if (OB_FAIL(sql.append_fmt(" AND table_id IN "))) {
+            } else if (OB_FAIL(sql_append_pure_ids(schema_status, table_ids, table_ids_size, sql))) {
+            }
+          }
+          if (FAILEDx(sql.append_fmt(" AND SCHEMA_VERSION <= %ld", schema_version))) {
+          } else if (OB_FAIL(sql.append_fmt(" ORDER BY TABLE_ID, COLUMN_ID, SCHEMA_VERSION"))) {
+          }
+        }
+      }
+      if (OB_SUCC(ret)) {
+        const bool check_deleted = (INT64_MAX != schema_version);
+        if (OB_FAIL(sql_client_retry_weak.read(res, sql.ptr()))) {
+          if (OB_TABLE_NOT_EXIST == ret || OB_ERR_TABLE_NOT_EXIST == ret) {
+            // __all_ai_column may not exist yet (bootstrap/upgrade); treat as empty
+            ret = OB_SUCCESS;
+          } else {
+            LOG_WARN("fail to read all ai column info", K(ret));
+          }
+        } else if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(ObSchemaRetrieveUtils::retrieve_ai_column_info(check_deleted, *result, table_schema_array))) {
+          LOG_WARN("fail to retrieve ai column info", K(ret));
+        }
       }
     }
   }

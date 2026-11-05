@@ -828,6 +828,9 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
             } else {
               ObColumnNameHashWrapper name_key(tmp_col->get_column_name_str());
               if (OB_FAIL(column_name_set_.set_refactored(name_key))) {
+              } else if (column.is_ai_column()
+                         && OB_FAIL(add_ai_hidden_columns(table_schema, column))) {
+                SQL_RESV_LOG(WARN, "fail to add hidden columns for ai column", K(ret));
               } else {
                 ret = OB_SUCCESS;
               }

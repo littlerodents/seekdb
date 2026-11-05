@@ -613,6 +613,12 @@ private:
                             common::ObArray<ObTableSchema *> &table_schema_array,
                             const uint64_t *table_ids = NULL,
                             const int64_t table_ids_size = 0);
+  int fetch_all_ai_column_info(const ObRefreshSchemaStatus &schema_status,
+                               const int64_t schema_version,
+                               common::ObISQLClient &sql_client,
+                               common::ObArray<ObTableSchema *> &table_schema_array,
+                               const uint64_t *table_ids = NULL,
+                               const int64_t table_ids_size = 0);
   int fetch_all_constraint_info_ignore_inner_table(const ObRefreshSchemaStatus &schema_status,
                                                    const int64_t schema_version,
                                                    common::ObISQLClient &sql_client,

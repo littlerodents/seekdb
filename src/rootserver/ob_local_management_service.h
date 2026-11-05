@@ -30,6 +30,7 @@
 #include "rootserver/ob_runtime_ddl_service.h"
 #include "rootserver/ob_root_minor_freeze.h"
 #include "rootserver/ob_system_admin_util.h"
+#include "rootserver/ob_ai_column_worker.h"
 #include "rootserver/ob_root_inspection.h"
 #include "share/ob_structured_event_logger.h"
 #include "rootserver/ob_snapshot_info_manager.h"
@@ -356,6 +357,7 @@ private:
   common::ObLatch bootstrap_lock_;
 
   // timers for local periodic tasks
+  ObAIColumnWorker ai_column_worker_;
   common::ObTimer load_ddl_task_timer_;
   common::ObTimer deadlock_event_clear_task_timer_;
   common::ObTimer purge_recyclebin_task_timer_;

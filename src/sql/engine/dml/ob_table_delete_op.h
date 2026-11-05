@@ -98,6 +98,12 @@ protected:
   virtual int check_need_exec_single_row() override;
 protected:
   DelRtDef2DArray del_rtdefs_;  //see the comment of DelCtDef2DArray
+  // AI column maintenance buffers
+  bool ai_hook_active_;
+  uint64_t ai_hook_table_id_;
+  common::ObSEArray<common::ObString, 8> ai_pk_names_;
+  common::ObSEArray<common::ObString, 8> ai_rowkey_preds_;
+  common::ObSEArray<common::ObString, 8> ai_rowkey_encs_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObTableDeleteOp);
 };

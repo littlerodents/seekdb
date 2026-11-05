@@ -2279,6 +2279,9 @@ typedef enum ObItemType
   T_FILE_SQL_OPTION = 4922,       // name[=value] option for file table functions / COPY
   T_FILE_SQL_OPTION_LIST = 4923,  // list of T_FILE_SQL_OPTION
   T_DESCRIBE_SELECT = 4924,       // marker child of T_EXPLAIN for `DESCRIBE SELECT ...`
+  T_AI_COLUMN_DEF = 4925,
+  T_AI_COLUMN_OPTION = 4926,
+  T_AI_COLUMN_RETRY = 4927,
   T_MAX //Attention: add a new type before T_MAX
 } ObItemType;
 

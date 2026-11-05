@@ -19,6 +19,7 @@
 #include "lib/literals/ob_literals.h"
 #include "share/ob_global_stat_proxy.h"
 #include "share/schema/ob_constraint.h"
+#include "share/schema/ob_ai_column_sql_service.h"
 #include "share/schema/ob_partition_sql_helper.h"
 #include "share/ob_timezone_mgr.h"
 
@@ -696,6 +697,12 @@ int ObTableSqlService::drop_table(const ObTableSchema &table_schema,
                        true))) {
     }
   }
+  // delete AI column metadata and pending tasks
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(ObAIColumnSqlService::drop_ai_columns(sql_client, table_id))) {
+      LOG_WARN("fail to clean ai column meta on drop table", K(ret), K(table_id));
+    }
+  }
 
   // delete from __all_table_stat, __all_monitor_modified, __all_column_usage, __all_optstat_user_prefs
   if (OB_SUCC(ret)) {
@@ -888,6 +895,12 @@ int ObTableSqlService::insert_single_column(
   int ret = OB_SUCCESS;
   if (OB_FAIL(check_ddl_allowed(new_table_schema))) {
   } else if (OB_FAIL(add_single_column(sql_client, new_column_schema))) {
+  }
+  if (OB_SUCC(ret) && new_column_schema.is_ai_column()) {
+    if (OB_FAIL(ObAIColumnSqlService::add_single_ai_column(sql_client, new_table_schema,
+            new_column_schema, new_column_schema.get_schema_version()))) {
+      LOG_WARN("fail to persist ai column meta for alter add column", K(ret));
+    }
   }
   if (OB_SUCC(ret)) {
     if (new_column_schema.is_autoincrement()) {
@@ -2079,6 +2092,21 @@ int ObTableSqlService::inner_create_sys_table(ObTableSchema &table,
   return ret;
 }
 
+int ObTableSqlService::batch_add_ai_columns_for_create_table(common::ObISQLClient &sql_client,
+    const ObIArray<ObTableSchema> &tables)
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < tables.count(); ++i) {
+    const ObTableSchema &table = tables.at(i);
+    if (OB_UNLIKELY(is_inner_table(table.get_table_id()))) {
+      // inner tables never carry AI columns
+    } else if (OB_FAIL(ObAIColumnSqlService::add_ai_columns(sql_client, table, table.get_schema_version()))) {
+      LOG_WARN("fail to persist ai column meta on create table", K(ret), "table_id", table.get_table_id());
+    }
+  }
+  return ret;
+}
+
 int ObTableSqlService::batch_create_table(ObIArray<ObTableSchema> &tables,
     common::ObISQLClient &sql_client,
     const common::ObString *ddl_stmt_str,
@@ -2153,6 +2181,8 @@ int ObTableSqlService::batch_create_table(ObIArray<ObTableSchema> &tables,
     } else if (FALSE_IT(time_guard.click("insert_all_column"))) {
     } else if (OB_FAIL(batch_add_constraints_for_create_table(sql_client, tables))) {
     } else if (FALSE_IT(time_guard.click("insert_all_cst"))) {
+    } else if (OB_FAIL(batch_add_ai_columns_for_create_table(sql_client, tables))) {
+    } else if (FALSE_IT(time_guard.click("insert_all_ai_column"))) {
     } else if (OB_FAIL(batch_add_table_part_info(sql_client, tables))) {
     } else if (FALSE_IT(time_guard.click("add_table_part_info"))) {
     } else if (OB_FAIL(exec_dml(sql_client, OB_ALL_DDL_OPERATION_TNAME, ddl_operation_dml,

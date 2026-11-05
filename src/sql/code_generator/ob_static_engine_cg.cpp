@@ -154,6 +154,28 @@ int ObStaticEngineCG::generate(const ObLogPlan &log_plan, ObPhysicalPlan &phy_pl
     if (OB_FAIL(set_properties_post(log_plan, phy_plan))) {
     }
   }
+  if (OB_SUCC(ret)) {
+    // Collect AI column references for the strict-read check. The check itself is
+    // evaluated at execution time depending on the session variable value.
+    const ObDMLStmt *stmt = log_plan.get_stmt();
+    share::schema::ObSchemaGetterGuard *schema_guard = opt_ctx_->get_schema_guard();
+    if (OB_NOT_NULL(stmt) && OB_NOT_NULL(schema_guard)) {
+      const common::ObIArray<ColumnItem> &columns = stmt->get_column_items();
+      for (int64_t i = 0; OB_SUCC(ret) && i < columns.count(); ++i) {
+        const ColumnItem &item = columns.at(i);
+        const share::schema::ObTableSchema *table_schema = NULL;
+        if (OB_FAIL(schema_guard->get_table_schema(item.table_id_, table_schema))) {
+          LOG_WARN("fail to get table schema for ai strict refs", K(ret));
+        } else if (OB_NOT_NULL(table_schema) && table_schema->has_ai_column()
+                   && OB_NOT_NULL(table_schema->get_ai_column_by_column_id(item.column_id_))) {
+          if (OB_FAIL(phy_plan.add_ai_strict_ref(item.table_id_,
+                  table_schema->get_ai_column_by_column_id(item.column_id_)->column_name_))) {
+            LOG_WARN("fail to add ai strict ref", K(ret));
+          }
+        }
+      }
+    }
+  }
   return ret;
 }
 

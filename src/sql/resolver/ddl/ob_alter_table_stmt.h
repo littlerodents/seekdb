@@ -82,6 +82,14 @@ public:
   bool has_rename_action() const
   { return alter_table_arg_.has_rename_action(); }
   virtual obcall::ObDDLArg &get_ddl_arg() { return alter_table_arg_; }
+  bool is_ai_column_retry() const { return is_ai_column_retry_; }
+  void set_ai_column_retry(bool v) { is_ai_column_retry_ = v; }
+  const common::ObString &get_ai_retry_column_name() const { return ai_retry_column_name_; }
+  void set_ai_retry_column_name(const common::ObString &name) { ai_retry_column_name_ = name; }
+  const common::ObString &get_ai_retry_predicate() const { return ai_retry_predicate_; }
+  void set_ai_retry_predicate(const common::ObString &pred) { ai_retry_predicate_ = pred; }
+  uint64_t get_ai_retry_table_id() const { return ai_retry_table_id_; }
+  void set_ai_retry_table_id(const uint64_t table_id) { ai_retry_table_id_ = table_id; }
   common::ObSArray<obcall::ObCreateIndexArg*> &get_index_arg_list() { return index_arg_list_; }
   void set_fts_arg_allocator(common::ObIAllocator *fts_arg_allocator) { fts_arg_allocator_ = fts_arg_allocator; }
   common::ObSArray<obcall::ObCreateForeignKeyArg> &get_foreign_key_arg_list()
@@ -106,6 +114,12 @@ public:
   void set_lock_priority();
 private:
   obcall::ObAlterTableArg alter_table_arg_;
+
+  // AI COLUMN RETRY action (executed locally, not dispatched to root service)
+  bool is_ai_column_retry_;
+  uint64_t ai_retry_table_id_;
+  common::ObString ai_retry_column_name_;
+  common::ObString ai_retry_predicate_;
   bool is_comment_table_;
   bool is_alter_system_;
   common::ObSArray<obcall::ObCreateIndexArg*> index_arg_list_;

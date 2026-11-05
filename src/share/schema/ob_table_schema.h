@@ -42,6 +42,7 @@
 #include "share/ob_define.h"
 #include "share/schema/ob_schema_struct.h"
 #include "share/schema/ob_trigger_info.h"
+#include "share/schema/ob_ai_column_info.h"
 #include "lib/compress/ob_compress_util.h"
 namespace oceanbase
 {
@@ -1080,6 +1081,14 @@ public:
   int delete_constraint(const common::ObString &constraint_name);
   // Copy all constraint information in src_schema
   int assign_constraint(const ObTableSchema &other);
+  // ai column related
+  int add_ai_column(const ObAIColumnInfo &ai_info);
+  int assign_ai_columns(const common::ObIArray<ObAIColumnInfo> &ai_columns);
+  void clear_ai_columns() { ai_columns_.reset(); }
+  int64_t get_ai_column_count() const { return ai_columns_.count(); }
+  bool has_ai_column() const { return !ai_columns_.empty(); }
+  const common::ObIArray<ObAIColumnInfo> &get_ai_columns() const { return ai_columns_; }
+  const ObAIColumnInfo *get_ai_column_by_column_id(const uint64_t column_id) const;
   int is_range_col_part_type(bool &is_range_column_type) const;
   void clear_constraint();
   int set_index_params(const common::ObString &index_params) { return deep_copy_str(index_params, index_params_); }
@@ -1628,6 +1637,9 @@ protected:
   ObConstraint **cst_array_;
   int64_t cst_array_capacity_;
   int64_t cst_cnt_;
+
+  // ai column related
+  common::ObSEArray<ObAIColumnInfo, 2> ai_columns_;
   common::ObSArray<ObForeignKeyInfo> foreign_key_infos_;
 
   // trigger

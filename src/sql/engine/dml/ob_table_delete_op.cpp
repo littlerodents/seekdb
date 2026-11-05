@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 #include "config_bridge.h"
 #include "sql/engine/dml/ob_table_delete_op.h"
+#include "sql/engine/dml/ob_ai_column_dml_service.h"
 #include "sql/engine/dml/ob_dml_service.h"
 
 namespace oceanbase
@@ -153,7 +154,20 @@ int ObTableDeleteOp::check_need_exec_single_row()
 OB_INLINE int ObTableDeleteOp::open_table_for_each()
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(del_rtdefs_.allocate_array(ctx_.get_allocator(), MY_SPEC.del_ctdefs_.count()))) {
+  ai_hook_active_ = false;
+  ai_pk_names_.reset();
+  ai_rowkey_preds_.reset();
+  ai_rowkey_encs_.reset();
+  if (OB_UNLIKELY(MY_SPEC.del_ctdefs_.count() > 0 && !MY_SPEC.del_ctdefs_.at(0).empty())) {
+    const ObDelCtDef &primary_ctdef = *MY_SPEC.del_ctdefs_.at(0).at(0);
+    ai_hook_table_id_ = primary_ctdef.das_ctdef_.table_id_;
+    if (OB_FAIL(ObAIColumnDMLService::on_write_op_open(ctx_, ai_hook_table_id_,
+                                                       ai_pk_names_, ai_hook_active_))) {
+      LOG_WARN("fail to activate ai column hook", K(ret));
+    }
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(del_rtdefs_.allocate_array(ctx_.get_allocator(), MY_SPEC.del_ctdefs_.count()))) {
   }
   fk_checkers_.reset();
   for (int64_t i = 0; OB_SUCC(ret) && i < del_rtdefs_.count(); ++i) {
@@ -248,6 +262,12 @@ OB_INLINE int ObTableDeleteOp::delete_row_to_das()
         break;
       } else if (OB_FAIL(calc_tablet_loc(del_ctdef, del_rtdef, tablet_loc))) {
       } else if (OB_FAIL(ObDMLService::delete_row(del_ctdef, del_rtdef, tablet_loc, dml_rtctx_, modify_row.old_row_))) {
+      } else if (ai_hook_active_ && 0 == j
+                 && OB_FAIL(ObAIColumnDMLService::collect_written_rowkey(
+                     ctx_.get_allocator(), eval_ctx_, ai_pk_names_,
+                     del_ctdef.old_row_, del_ctdef.das_ctdef_.rowkey_cnt_,
+                     ai_rowkey_preds_, ai_rowkey_encs_))) {
+        LOG_WARN("fail to collect rowkey for ai column maintenance", K(ret));
       } else if (need_after_row_process(del_ctdef) && OB_FAIL(dml_modify_rows_.push_back(modify_row))) {
       } else {
         ++del_rtdef.cur_row_num_;
@@ -266,6 +286,14 @@ OB_INLINE int ObTableDeleteOp::delete_row_to_das()
 int ObTableDeleteOp::write_rows_post_proc(int last_errno)
 {
   int ret = last_errno;
+  if (OB_SUCC(ret) && iter_end_ && ai_hook_active_ && !ai_rowkey_preds_.empty()) {
+    if (OB_FAIL(submit_all_dml_task())) {
+      LOG_WARN("fail to flush dml tasks before ai maintenance", K(ret));
+    } else if (OB_FAIL(ObAIColumnDMLService::finish_write(ctx_, ai_hook_table_id_,
+            true /*delete*/, false /*not insert*/, ai_rowkey_preds_, ai_rowkey_encs_))) {
+      LOG_WARN("fail to run ai column maintenance on delete", K(ret));
+    }
+  }
   if (iter_end_) {
     ObPhysicalPlanCtx *plan_ctx = GET_PHY_PLAN_CTX(ctx_);
     for (int64_t i = 0; OB_SUCC(ret) && i < del_rtdefs_.count(); ++i) {

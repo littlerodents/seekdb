@@ -43,6 +43,7 @@ ROOTSERVER_UNITY_GROUPS = [
             "src/rootserver/ob_objpriv_mysql_ddl_operator.cpp",
             "src/rootserver/ob_admin_job_table_operator.cpp",
             "src/rootserver/ob_local_management_service.cpp",
+            "src/rootserver/ob_ai_column_worker.cpp",
             "src/rootserver/ob_runtime_ddl_service.cpp",
             "src/rootserver/ob_server_thread_helper.cpp",
         ],
