@@ -125,6 +125,12 @@ public:
   void set_result_spec_column_id(uint64_t v) { result_spec_column_id_ = v; }
   void set_max_retries(int64_t v) { max_retries_ = v; }
   void set_embed_dim(int64_t v) { embed_dim_ = v; }
+  void set_column_name(const common::ObString &v) { column_name_ = v; }
+  void set_normalized_expr(const common::ObString &v) { normalized_expr_ = v; }
+  void set_type_prompt(const common::ObString &v) { type_prompt_ = v; }
+  void set_ai_model_name(const common::ObString &v) { ai_model_name_ = v; }
+  void set_ai_func(const common::ObString &v) { ai_func_ = v; }
+  void set_sync_mode(const common::ObString &v) { sync_mode_ = v; }
   uint64_t column_id_;
   uint64_t state_column_id_;
   uint64_t request_column_id_;
