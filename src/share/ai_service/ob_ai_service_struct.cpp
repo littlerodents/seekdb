@@ -31,6 +31,7 @@ namespace share
 const ObString ObAiModelEndpointInfo::DEFAULT_SCOPE = "ALL";
 
 const char *VALID_PROVIDERS[] = {
+  ObAiModelEndpointInfo::OLLAMA_PROVIDER,
   "ALIYUN-OPENAI",
   "ALIYUN-DASHSCOPE",
   "DEEPSEEK",
@@ -112,7 +113,8 @@ int ObAiModelEndpointInfo::check_valid() const
   } else if (url_.empty()) {
     ret = OB_AI_FUNC_PARAM_EMPTY;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("url"), "url");
-  } else if (access_key_.empty()) {
+  } else if (access_key_.empty() && provider_.case_compare(OLLAMA_PROVIDER) != 0) {
+    // ollama usually serves local models and does not require an access key
     ret = OB_AI_FUNC_PARAM_EMPTY;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("access_key"), "access_key");
     LOG_WARN("access_key is empty", K(ret), K(*this));
@@ -221,7 +223,11 @@ EndpointType::TYPE EndpointType::str_to_endpoint_type(const ObString &type_str)
 int ObAiModelEndpointInfo::get_unencrypted_access_key(common::ObIAllocator &allocator, ObString &unencrypted_access_key) const
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(decrypt_access_key_(allocator, access_key_, unencrypted_access_key))) {
+  // ALTER may persist an empty access_key as NULL; treat both as "no key"
+  // so ollama-style keyless endpoints keep working.
+  if (OB_ISNULL(access_key_.ptr()) || access_key_.empty()) {
+    unencrypted_access_key.reset();
+  } else if (OB_FAIL(decrypt_access_key_(allocator, access_key_, unencrypted_access_key))) {
   }
   return ret;
 }
