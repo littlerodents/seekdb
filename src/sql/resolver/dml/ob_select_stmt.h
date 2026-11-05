@@ -128,7 +128,12 @@ struct ObSelectIntoItem
         max_file_size_(DEFAULT_MAX_FILE_SIZE),
         escaped_cht_(),
         buffer_size_(DEFAULT_BUFFER_SIZE),
-        external_properties_()
+        external_properties_(),
+        is_copy_(false),
+        copy_header_(true),
+        copy_nullstr_(),
+        copy_delim_(","),
+        copy_quote_("\"")
   {
     field_str_.set_varchar(DEFAULT_FIELD_TERM_STR);
     field_str_.set_collation_type(ObCharset::get_system_collation());
@@ -155,6 +160,11 @@ struct ObSelectIntoItem
     cs_type_ = other.cs_type_;
     buffer_size_ = other.buffer_size_;
     external_properties_ = other.external_properties_;
+    is_copy_ = other.is_copy_;
+    copy_header_ = other.copy_header_;
+    copy_nullstr_ = other.copy_nullstr_;
+    copy_delim_ = other.copy_delim_;
+    copy_quote_ = other.copy_quote_;
     return user_vars_.assign(other.user_vars_);
   }
   int deep_copy(ObIAllocator &allocator,
@@ -186,6 +196,14 @@ struct ObSelectIntoItem
   common::ObCollationType cs_type_;
   int64_t buffer_size_;
   common::ObString external_properties_;
+  // COPY (query) TO 'file' (format csv, header, nullstr 'NULL') flavor:
+  // deterministic DuckDB-style CSV output with a header line, configurable
+  // null string and demand-driven quoting
+  bool is_copy_;
+  bool copy_header_;
+  common::ObString copy_nullstr_;
+  common::ObString copy_delim_;
+  common::ObString copy_quote_;
 
   static const char* const DEFAULT_FIELD_TERM_STR;
   static const char* const DEFAULT_LINE_TERM_STR;

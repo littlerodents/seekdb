@@ -103,12 +103,15 @@ typedef struct ObJsonTableDef {
 
 struct ObValuesTableDef {
   ObValuesTableDef() : start_param_idx_(-1), end_param_idx_(-1), column_cnt_(0), row_cnt_(0),
-                       access_type_(ACCESS_EXPR), is_const_(false) {}
+                       access_type_(ACCESS_EXPR), is_const_(false), file_kind_(-1),
+                       file_header_(true), file_delim_(','), file_quote_('"'), file_escape_('"'),
+                       file_skip_(0) {}
   enum TableAccessType {
     ACCESS_EXPR = 0,  // expr, one by one
     FOLD_ACCESS_EXPR, // expr, one expr->ObSqlArray
     ACCESS_PARAM,     // by a continuous space of param_store
     ACCESS_OBJ,       // ObObj one by one, used for non-parametric
+    ACCESS_FILE,      // authorized local file, read incrementally by the operator
   };
   int deep_copy(const ObValuesTableDef &other,
                 ObIRawExprCopier &expr_copier,
@@ -124,6 +127,15 @@ struct ObValuesTableDef {
   TableAccessType access_type_;
   bool is_const_; // values table’s outputs are all params.
   common::ObArray<ObRawExprResType, common::ModulePageAllocator, true> column_types_;
+  common::ObString file_path_;
+  common::ObString file_nullstr_;
+  int64_t file_kind_;
+  bool file_header_;
+  int64_t file_delim_;
+  int64_t file_quote_;
+  int64_t file_escape_;
+  int64_t file_skip_;
+  common::ObSEArray<int64_t, 7> file_identity_;
   virtual TO_STRING_KV(K(column_cnt_), K(row_cnt_), K(access_exprs_), K(start_param_idx_),
                        K(end_param_idx_), K(access_objs_), K(column_ndvs_), K(column_nnvs_),
                        K(access_type_), K(is_const_), K(column_types_));
@@ -224,6 +236,10 @@ struct TableItem
   bool is_function_table() const { return FUNCTION_TABLE == type_; }
   bool is_json_table() const { return JSON_TABLE == type_; }  // json_table_def_->table_type_ == MulModeTableType::OB_ORA_JSON_TABLE_TYPE
   bool is_values_table() const { return VALUES_TABLE == type_; }//used to mark values statement: values row(1,2), row(3,4);
+  // file-as-database table (read_csv/read_json/read_ndjson/read_parquet/glob),
+  // internally materialized as a values table plus scan metadata
+  bool is_file_table() const { return VALUES_TABLE == type_ && nullptr != values_table_def_ &&
+                                      values_table_def_->file_kind_ >= 0; }
 
   bool is_lateral_table() const { return LATERAL_TABLE == type_; }
   bool is_extended_all_or_user_sys_view() const

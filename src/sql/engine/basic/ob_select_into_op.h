@@ -71,7 +71,13 @@ public:
       parallel_(1),
       buffer_size_(DEFAULT_BUFFER_SIZE),
       is_overwrite_(false),
-      external_properties_(alloc)
+      external_properties_(alloc),
+      is_copy_(false),
+      copy_header_(true),
+      copy_nullstr_(),
+      copy_delim_(","),
+      copy_quote_("\""),
+      copy_headers_(alloc)
   {
   }
 
@@ -91,6 +97,13 @@ public:
   int64_t buffer_size_;
   bool is_overwrite_;
   ObExternalFileFormat::StringData external_properties_;
+  // COPY (query) TO 'file' (format csv, header, nullstr 'NULL') flavor
+  bool is_copy_;
+  bool copy_header_;
+  common::ObString copy_nullstr_;
+  common::ObString copy_delim_;
+  common::ObString copy_quote_;
+  common::ObFixedArray<common::ObString, common::ObIAllocator> copy_headers_;
   static const int64_t DEFAULT_MAX_FILE_SIZE = 256LL * 1024 * 1024;
   static const int64_t DEFAULT_BUFFER_SIZE = 1LL * 1024 * 1024;
 };
@@ -201,6 +214,7 @@ private:
 
   int get_row_str(const int64_t buf_len, bool is_first_row, char *buf, int64_t &pos);
   int into_dumpfile(ObExternalFileWriter *data_writer);
+  int write_copy_header(ObExternalFileWriter *data_writer);
   int into_outfile(ObExternalFileWriter *data_writer);
   int into_outfile_batch_csv(const ObBatchRows &brs, ObExternalFileWriter *data_writer);
   int extract_fisrt_wchar_from_varhcar(const ObObj &obj, int32_t &wchar);

@@ -4477,6 +4477,9 @@ int ObValuesTableDef::deep_copy(const ObValuesTableDef &other,
   } else if (OB_FAIL(expr_copier.copy(other.access_exprs_, access_exprs_))) {
   } else if (OB_FAIL(column_ndvs_.assign(other.column_ndvs_))) {
   } else if (OB_FAIL(column_nnvs_.assign(other.column_nnvs_))) {
+  } else if (OB_FAIL(file_identity_.assign(other.file_identity_))) {
+  } else if (OB_FAIL(ob_write_string(*allocator, other.file_path_, file_path_))) {
+  } else if (OB_FAIL(ob_write_string(*allocator, other.file_nullstr_, file_nullstr_))) {
   } else {
     access_type_ = other.access_type_;
     start_param_idx_ = other.start_param_idx_;
@@ -4484,6 +4487,12 @@ int ObValuesTableDef::deep_copy(const ObValuesTableDef &other,
     column_cnt_ = other.column_cnt_;
     row_cnt_ = other.row_cnt_;
     is_const_ = other.is_const_;
+    file_kind_ = other.file_kind_;
+    file_header_ = other.file_header_;
+    file_delim_ = other.file_delim_;
+    file_quote_ = other.file_quote_;
+    file_escape_ = other.file_escape_;
+    file_skip_ = other.file_skip_;
     for (int64_t i = 0; OB_SUCC(ret) && i < other.access_objs_.count(); ++i) {
       const ObObjParam &obj = other.access_objs_.at(i);
       ObObjParam tmp_obj = obj;

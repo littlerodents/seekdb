@@ -6798,6 +6798,24 @@ int ObLogPlan::candi_allocate_select_into()
   return ret;
 }
 
+int ObLogPlan::fill_copy_header_names(const ObSelectStmt &stmt,
+                                       ObIArray<common::ObString> &names)
+{
+  int ret = OB_SUCCESS;
+  const ObIArray<SelectItem> &items = stmt.get_select_items();
+  for (int64_t i = 0; OB_SUCC(ret) && i < items.count(); ++i) {
+    common::ObString name = items.at(i).alias_name_;
+    if (name.empty() && OB_NOT_NULL(items.at(i).expr_)
+        && items.at(i).expr_->is_column_ref_expr()) {
+      name = static_cast<const ObColumnRefRawExpr *>(items.at(i).expr_)->get_column_name();
+    }
+    if (OB_FAIL(names.push_back(name))) {
+      LOG_WARN("push copy header name failed", K(ret));
+    }
+  }
+  return ret;
+}
+
 int ObLogPlan::allocate_select_into_as_top(ObLogicalOperator *&old_top)
 {
   int ret = OB_SUCCESS;
@@ -6815,6 +6833,8 @@ int ObLogPlan::allocate_select_into_as_top(ObLogicalOperator *&old_top)
       ret = OB_ERR_UNEXPECTED;
     } else if (OB_FAIL(stmt->get_select_exprs(select_exprs))) {
     } else if (OB_FAIL(select_into->get_select_exprs().assign(select_exprs))) {
+    } else if (OB_FAIL(ObLogPlan::fill_copy_header_names(*stmt, select_into->get_copy_headers()))) {
+      LOG_WARN("failed to fill copy header names", K(ret));
     }
     if (OB_SUCC(ret)) {
       select_into->set_into_type(into_item->into_type_);
@@ -6830,6 +6850,11 @@ int ObLogPlan::allocate_select_into_as_top(ObLogicalOperator *&old_top)
       select_into->set_escaped_cht(into_item->escaped_cht_);
       select_into->set_cs_type(into_item->cs_type_);
       select_into->set_external_properties(into_item->external_properties_);
+      select_into->set_is_copy(into_item->is_copy_);
+      select_into->set_copy_header(into_item->copy_header_);
+      select_into->set_copy_nullstr(into_item->copy_nullstr_);
+      select_into->set_copy_delim(into_item->copy_delim_);
+      select_into->set_copy_quote(into_item->copy_quote_);
       select_into->set_child(ObLogicalOperator::first_child, old_top);
       // compute property
       if (OB_FAIL(select_into->compute_property())) {

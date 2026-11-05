@@ -1700,7 +1700,26 @@ int ObStaticEngineCG::generate_spec(ObLogValuesTableAccess &op,
     if (OB_FAIL(spec.column_exprs_.prepare_allocate(op.get_column_exprs().count()))) {
     } else if (OB_FAIL(spec.value_exprs_.prepare_allocate(table_def->access_exprs_.count()))) {
     } else if (OB_FAIL(spec.obj_params_.prepare_allocate(table_def->access_objs_.count()))) {
+    } else if (ObValuesTableDef::ACCESS_FILE == table_def->access_type_ &&
+               OB_FAIL(spec.file_identity_.prepare_allocate(table_def->file_identity_.count()))) {
+    } else if (ObValuesTableDef::ACCESS_FILE == table_def->access_type_ &&
+               OB_FAIL(spec.file_column_indexes_.prepare_allocate(op.get_column_exprs().count()))) {
+    } else if (ObValuesTableDef::ACCESS_FILE == table_def->access_type_ &&
+               OB_FAIL(ob_write_string(allocator, table_def->file_path_, spec.file_path_))) {
+    } else if (ObValuesTableDef::ACCESS_FILE == table_def->access_type_ &&
+               OB_FAIL(ob_write_string(allocator, table_def->file_nullstr_, spec.file_nullstr_))) {
     } else {
+      if (ObValuesTableDef::ACCESS_FILE == table_def->access_type_) {
+        spec.file_kind_ = table_def->file_kind_;
+        spec.file_header_ = table_def->file_header_;
+        spec.file_delim_ = table_def->file_delim_;
+        spec.file_quote_ = table_def->file_quote_;
+        spec.file_escape_ = table_def->file_escape_;
+        spec.file_skip_ = table_def->file_skip_;
+        for (int64_t i = 0; i < table_def->file_identity_.count(); ++i) {
+          spec.file_identity_.at(i) = table_def->file_identity_.at(i);
+        }
+      }
       for (int64_t i = 0; OB_SUCC(ret) && i < op.get_column_exprs().count(); i++) {
         ObColumnRefRawExpr *col_expr = op.get_column_exprs().at(i);
         ObExpr *expr = NULL;
@@ -1712,6 +1731,9 @@ int ObStaticEngineCG::generate_spec(ObLogValuesTableAccess &op,
           ret = OB_ERR_UNEXPECTED;
         } else {
           spec.column_exprs_.at(i) = expr;
+          if (ObValuesTableDef::ACCESS_FILE == table_def->access_type_) {
+            spec.file_column_indexes_.at(i) = col_expr->get_column_id() - OB_APP_MIN_COLUMN_ID;
+          }
         }
       }
       for (int64_t i = 0; OB_SUCC(ret) && i < table_def->access_exprs_.count(); i++) {
@@ -5460,6 +5482,7 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
   } else if (OB_FAIL(spec.external_properties_.store_str(op.get_external_properties()))) {
   } else if (OB_FAIL(spec.user_vars_.init(op.get_user_vars().count()))) {
   } else if (OB_FAIL(spec.select_exprs_.init(op.get_select_exprs().count()))) {
+  } else if (OB_FAIL(spec.copy_headers_.init(op.get_copy_headers().count()))) {
   } else {
     ObString var;
     for (int64_t i = 0; OB_SUCC(ret) && i < op.get_user_vars().count(); ++i) {
@@ -5477,6 +5500,12 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
       } else if (OB_FAIL(spec.select_exprs_.push_back(rt_expr))) {
       }
     }
+    for (int64_t i = 0; OB_SUCC(ret) && i < op.get_copy_headers().count(); ++i) {
+      ObString name;
+      if (OB_FAIL(ob_write_string(alloc, op.get_copy_headers().at(i), name))) {
+      } else if (OB_FAIL(spec.copy_headers_.push_back(name))) {
+      }
+    }
     if (OB_SUCC(ret)) {
       spec.into_type_ = op.get_into_type();
       spec.is_optional_ = op.get_is_optional();
@@ -5486,6 +5515,12 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
       spec.cs_type_ = op.get_cs_type();
       spec.parallel_ = op.get_parallel();
       spec.is_overwrite_ = op.get_is_overwrite();
+      spec.is_copy_ = op.get_is_copy();
+      spec.copy_header_ = op.get_copy_header();
+      if (OB_FAIL(ob_write_string(alloc, op.get_copy_nullstr(), spec.copy_nullstr_))) {
+      } else if (OB_FAIL(ob_write_string(alloc, op.get_copy_delim(), spec.copy_delim_))) {
+      } else if (OB_FAIL(ob_write_string(alloc, op.get_copy_quote(), spec.copy_quote_))) {
+      }
       spec.plan_->need_drive_dml_query_ = true;
     }
   }

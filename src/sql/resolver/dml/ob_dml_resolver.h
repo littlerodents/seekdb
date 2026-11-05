@@ -23,6 +23,7 @@
 #include "sql/resolver/expr/ob_raw_expr_util.h"
 #include "sql/resolver/dml/ob_select_stmt.h"
 #include "sql/resolver/expr/ob_shared_expr_resolver.h"
+
 namespace oceanbase
 {
 namespace sql
@@ -778,6 +779,8 @@ private:
   bool check_expr_has_colref(ObRawExpr *expr);
 
   int resolve_values_table_item(const ParseNode &table_node, TableItem *&table_item);
+  // file-as-database table functions: read_csv/read_json/read_ndjson/read_parquet/glob
+  int resolve_file_table_item(const ParseNode &table_node, TableItem *&table_item);
   int resolve_values_table_for_select(const ParseNode &table_node,
                                       ObValuesTableDef &table_values);
   int resolve_values_table_for_insert(const ParseNode &table_node,
