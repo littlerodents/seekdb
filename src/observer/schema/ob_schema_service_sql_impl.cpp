@@ -1425,7 +1425,7 @@ int ObSchemaServiceSQLImpl::fetch_all_ai_column_info(
       if (OB_SUCC(ret)) {
         const bool check_deleted = (INT64_MAX != schema_version);
         if (OB_FAIL(sql_client_retry_weak.read(res, sql.ptr()))) {
-          if (OB_TABLE_NOT_EXIST == ret || OB_ERR_TABLE_NOT_EXIST == ret) {
+          if (OB_TABLE_NOT_EXIST == ret) {
             // __all_ai_column may not exist yet (bootstrap/upgrade); treat as empty
             ret = OB_SUCCESS;
           } else {
