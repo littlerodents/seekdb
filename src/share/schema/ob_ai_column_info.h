@@ -19,6 +19,7 @@
 
 #include "lib/ob_name_def.h"
 #include "lib/string/ob_string.h"
+#include "lib/allocator/ob_allocator.h"
 #include "lib/utility/ob_unify_serialize.h"
 
 namespace oceanbase
@@ -42,7 +43,8 @@ struct ObAIColumnInfo
   OB_UNIS_VERSION(1);
 
 public:
-  ObAIColumnInfo()
+  ObAIColumnInfo() : ObAIColumnInfo(nullptr) {}
+  explicit ObAIColumnInfo(common::ObIAllocator *allocator)
     : table_id_(common::OB_INVALID_ID),
       column_id_(common::OB_INVALID_ID),
       state_column_id_(common::OB_INVALID_ID),
@@ -118,19 +120,19 @@ public:
 
   uint64_t table_id_;
   uint64_t get_table_id() const { return table_id_; }
-  void set_table_id(uint64_t v) { table_id_ = v; }
-  void set_column_id(uint64_t v) { column_id_ = v; }
-  void set_state_column_id(uint64_t v) { state_column_id_ = v; }
-  void set_request_column_id(uint64_t v) { request_column_id_ = v; }
-  void set_result_spec_column_id(uint64_t v) { result_spec_column_id_ = v; }
-  void set_max_retries(int64_t v) { max_retries_ = v; }
-  void set_embed_dim(int64_t v) { embed_dim_ = v; }
-  void set_column_name(const common::ObString &v) { column_name_ = v; }
-  void set_normalized_expr(const common::ObString &v) { normalized_expr_ = v; }
-  void set_type_prompt(const common::ObString &v) { type_prompt_ = v; }
-  void set_ai_model_name(const common::ObString &v) { ai_model_name_ = v; }
-  void set_ai_func(const common::ObString &v) { ai_func_ = v; }
-  void set_sync_mode(const common::ObString &v) { sync_mode_ = v; }
+  uint64_t &set_table_id() { return table_id_; }
+  uint64_t &set_column_id() { return column_id_; }
+  uint64_t &set_state_column_id() { return state_column_id_; }
+  uint64_t &set_request_column_id() { return request_column_id_; }
+  uint64_t &set_result_spec_column_id() { return result_spec_column_id_; }
+  int64_t &set_max_retries() { return max_retries_; }
+  int64_t &set_embed_dim() { return embed_dim_; }
+  int set_column_name(const common::ObString &v) { column_name_ = v; return 0; }
+  int set_normalized_expr(const common::ObString &v) { normalized_expr_ = v; return 0; }
+  int set_type_prompt(const common::ObString &v) { type_prompt_ = v; return 0; }
+  int set_ai_model_name(const common::ObString &v) { ai_model_name_ = v; return 0; }
+  int set_ai_func(const common::ObString &v) { ai_func_ = v; return 0; }
+  int set_sync_mode(const common::ObString &v) { sync_mode_ = v; return 0; }
   uint64_t column_id_;
   uint64_t state_column_id_;
   uint64_t request_column_id_;
