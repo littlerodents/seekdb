@@ -19,6 +19,7 @@
 
 #include "lib/charset/ob_charset.h"
 #include "lib/lock/ob_bucket_lock.h"
+#include "lib/lock/ob_tc_rwlock.h"
 #include "storage/fts/dict/ob_ft_dict_def.h"
 
 namespace oceanbase
@@ -96,7 +97,7 @@ class ObFTCacheRangeContainer;
 class ObFTDictHub
 {
 public:
-  ObFTDictHub() : is_inited_(false), dict_map_(), rw_dict_lock_() {}
+  ObFTDictHub() : is_inited_(false), dict_map_(), rw_dict_lock_(), dict_build_lock_() {}
   ~ObFTDictHub() {}
 
   int init();
@@ -118,6 +119,10 @@ private:
   // holds info of dict
   hash::ObHashMap<ObFTDictInfoKey, ObFTDictInfo> dict_map_;
   ObBucketLock rw_dict_lock_;
+  // Serializes dictionary (re)builders only. The expensive DAT build runs while
+  // holding this lock instead of the bucket write lock, so that concurrent
+  // load_cache() readers are never starved by a rebuild.
+  TCRWLock dict_build_lock_;
 };
 
 } //  namespace storage
