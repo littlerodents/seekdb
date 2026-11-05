@@ -2194,7 +2194,7 @@ const char *ObSysVarMeta::SYS_VAR_NAMES_SORTED_BY_ID[] = {
   "ob_hnsw_extra_info_max_size",
   "_push_join_predicate",
   "ob_sparse_drop_ratio_search",
-  "enable_file_sql"
+  "enable_file_sql",
   "ai_column_strict_read"
 };
 

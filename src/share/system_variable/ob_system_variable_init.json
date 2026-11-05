@@ -10984,9 +10984,16 @@
     "data_type": "bool",
     "info": "enable reading authorized local files through SQL table functions",
     "flags": "GLOBAL | SESSION | NEED_SERIALIZE | INFLUENCE_PLAN",
+    "publish_version": "",
+    "info_cn": "",
+    "background_cn": "",
+    "ref_url": ""
+  },
   "ai_column_strict_read": {
-    "id": 10754,
+    "id": 10756,
     "name": "ai_column_strict_read",
+    "min_val": "0",
+    "max_val": "1",
     "default_value": "0",
     "base_value": "0",
     "data_type": "bool",

@@ -874,7 +874,7 @@ int ObAlterTableResolver::resolve_ai_column_retry(const ParseNode &node)
             }
             while (begin < where_text.length() && isspace(where_text[begin])) { ++begin; }
             ObString pred(where_text.length() - begin, where_text.ptr() + begin);
-            if (OB_FAIL(ob_rewrite_ai_retry_status(pred, ObString(state_name.ptr(), state_name.length()), predicate))) {
+            if (OB_FAIL(ob_rewrite_ai_retry_status(pred, ObString(state_name.length(), state_name.ptr()), predicate))) {
               SQL_RESV_LOG(WARN, "fail to rewrite status pseudo column", K(ret));
             }
           } else {
@@ -3624,7 +3624,7 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
           ObSqlString request_name;
           ObSqlString result_spec_name;
           if (OB_FAIL(share::schema::ObAIColumnSqlService::hidden_ai_column_names(
-                  alter_column_schema.get_column_namestr(),
+                  alter_column_schema.get_column_name_str(),
                   state_name, request_name, result_spec_name))) {
             SQL_RESV_LOG(WARN, "fail to build hidden ai column names", K(ret));
           } else {
