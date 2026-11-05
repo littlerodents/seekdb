@@ -118,6 +118,13 @@ public:
 
   uint64_t table_id_;
   uint64_t get_table_id() const { return table_id_; }
+  void set_table_id(uint64_t v) { table_id_ = v; }
+  void set_column_id(uint64_t v) { column_id_ = v; }
+  void set_state_column_id(uint64_t v) { state_column_id_ = v; }
+  void set_request_column_id(uint64_t v) { request_column_id_ = v; }
+  void set_result_spec_column_id(uint64_t v) { result_spec_column_id_ = v; }
+  void set_max_retries(int64_t v) { max_retries_ = v; }
+  void set_embed_dim(int64_t v) { embed_dim_ = v; }
   uint64_t column_id_;
   uint64_t state_column_id_;
   uint64_t request_column_id_;
