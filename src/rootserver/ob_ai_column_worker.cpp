@@ -16,6 +16,9 @@
 
 #define USING_LOG_PREFIX ROOT_RS
 
+#include "lib/oblog/ob_log.h"
+#include "lib/oblog/ob_log_module.h"
+#include "lib/mysqlclient/ob_isql_client.h"
 #include "rootserver/ob_ai_column_worker.h"
 #include "lib/allocator/ob_allocator.h"
 #include "lib/time/ob_time_utility.h"
@@ -179,7 +182,7 @@ int ObAIColumnWorker::fetch_eligible_tasks(common::ObIAllocator &alloc,
       "LIMIT %ld";
   SMART_VAR(ObMySQLProxy::MySQLResult, res)
   {
-    ObMySQLResult *result = NULL;
+    common::sqlclient::ObMySQLResult *result = NULL;
     ObSqlString real_sql;
     if (OB_FAIL(real_sql.assign_fmt(sql, ob_ai_worker::MAX_TASKS_PER_ROUND))) {
     } else if (OB_FAIL(sql_proxy_->read(res, real_sql.ptr()))) {
@@ -302,7 +305,7 @@ int ObAIColumnWorker::process_group(common::ObIAllocator &alloc,
       bool row_exists = false;
       SMART_VAR(ObMySQLProxy::MySQLResult, res)
       {
-        ObMySQLResult *result = NULL;
+        common::sqlclient::ObMySQLResult *result = NULL;
         if (OB_FAIL(sql_proxy_->read(res, read_sql.ptr()))) {
           LOG_WARN("fail to read current ai requests", K(ret), K(read_sql));
         } else if (OB_ISNULL(result = res.get_result())) {
