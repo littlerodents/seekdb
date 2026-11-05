@@ -18,7 +18,7 @@
 
 #include "lib/oblog/ob_log.h"
 #include "lib/oblog/ob_log_module.h"
-#include "lib/mysqlclient/ob_isql_client.h"
+#include "common/mysqlclient/ob_isql_client.h"
 #include "rootserver/ob_ai_column_worker.h"
 #include "lib/allocator/ob_allocator.h"
 #include "lib/time/ob_time_utility.h"
