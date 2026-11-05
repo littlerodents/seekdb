@@ -84,14 +84,14 @@ int ObAIColumnSqlService::resolve_ai_column_info(const ObTableSchema &table_sche
     ai_info = column.get_ai_info();
     ai_info.table_id_ = table_schema.get_table_id();
     ai_info.column_id_ = column.get_column_id();
-    ai_info.column_name_ = column.get_column_namestr();
+    ai_info.column_name_ = column.get_column_name_str();
     ObSqlString state_name;
     ObSqlString request_name;
     ObSqlString result_spec_name;
     const ObColumnSchemaV2 *state_col = NULL;
     const ObColumnSchemaV2 *request_col = NULL;
     const ObColumnSchemaV2 *result_spec_col = NULL;
-    if (OB_FAIL(hidden_ai_column_names(column.get_column_namestr(),
+    if (OB_FAIL(hidden_ai_column_names(column.get_column_name_str(),
                                        state_name, request_name, result_spec_name))) {
       LOG_WARN("fail to build hidden ai column names", K(ret));
     } else if (OB_ISNULL(state_col = table_schema.get_column_schema(state_name.ptr()))) {

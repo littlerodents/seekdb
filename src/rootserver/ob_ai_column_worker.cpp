@@ -19,7 +19,7 @@
 #include "rootserver/ob_ai_column_worker.h"
 #include "lib/allocator/ob_allocator.h"
 #include "lib/time/ob_time_utility.h"
-#include "lib/mysqlclient/ob_mysql_result.h"
+#include "common/mysqlclient/ob_mysql_result.h"
 #include "share/schema/ob_multi_version_schema_service.h"
 #include "share/schema/ob_schema_getter_guard.h"
 #include "share/schema/ob_table_schema.h"
