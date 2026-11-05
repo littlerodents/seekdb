@@ -185,7 +185,10 @@ int ObExprTokenize::TokenizeParam::parse_json_param(const ObIJsonBase *obj)
   } else {
     ret = OB_INVALID_ARGUMENT;
     ObSqlString message;
-    message.append_fmt("config: %s", str.ptr());
+    // str is an ObString view into the parsed JSON and is not guaranteed to be
+    // NUL-terminated; bound the format by its length so the message never reads
+    // past the key.
+    message.append_fmt("config: %.*s", static_cast<int>(str.length()), str.ptr());
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, message.ptr());
   }
   return ret;
