@@ -1022,6 +1022,8 @@ public:
   /** @brief allocate select into as new top(parent)**/
 
   int allocate_select_into_as_top(ObLogicalOperator *&old_top);
+  static int fill_copy_header_names(const ObSelectStmt &stmt,
+                                    common::ObIArray<common::ObString> &names);
 
   int check_select_into(bool &has_select_into,
                         bool &is_single,

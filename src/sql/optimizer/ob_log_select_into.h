@@ -44,7 +44,13 @@ public:
         escaped_cht_(),
         cs_type_(CS_TYPE_INVALID),
         is_overwrite_(false),
-        external_properties_()
+        external_properties_(),
+        is_copy_(false),
+        copy_header_(true),
+        copy_nullstr_(),
+        copy_delim_(","),
+        copy_quote_("\""),
+        copy_headers_()
   {
   }
   virtual ~ObLogSelectInto() {}
@@ -108,6 +114,21 @@ public:
   {
     external_properties_.assign_ptr(external_properties.ptr(), external_properties.length());
   }
+  inline void set_is_copy(bool is_copy) { is_copy_ = is_copy; }
+  inline void set_copy_header(bool copy_header) { copy_header_ = copy_header; }
+  inline void set_copy_nullstr(const common::ObString &nullstr)
+  {
+    copy_nullstr_.assign_ptr(nullstr.ptr(), nullstr.length());
+  }
+  inline void set_copy_delim(const common::ObString &delim)
+  {
+    copy_delim_.assign_ptr(delim.ptr(), delim.length());
+  }
+  inline void set_copy_quote(const common::ObString &quote)
+  {
+    copy_quote_.assign_ptr(quote.ptr(), quote.length());
+  }
+  inline common::ObIArray<common::ObString> &get_copy_headers() { return copy_headers_; }
   inline ObItemType get_into_type() const
   {
     return into_type_;
@@ -164,6 +185,11 @@ public:
   {
     return external_properties_;
   }
+  inline bool get_is_copy() const { return is_copy_; }
+  inline bool get_copy_header() const { return copy_header_; }
+  inline common::ObString get_copy_nullstr() const { return copy_nullstr_; }
+  inline common::ObString get_copy_delim() const { return copy_delim_; }
+  inline common::ObString get_copy_quote() const { return copy_quote_; }
   const common::ObIArray<ObRawExpr*> &get_select_exprs() const { return select_exprs_; }
   common::ObIArray<ObRawExpr*> &get_select_exprs() { return select_exprs_; }
   virtual int est_cost() override;
@@ -188,6 +214,12 @@ private:
   common::ObCollationType cs_type_;
   bool is_overwrite_;
   common::ObString external_properties_;
+  bool is_copy_;
+  bool copy_header_;
+  common::ObString copy_nullstr_;
+  common::ObString copy_delim_;
+  common::ObString copy_quote_;
+  common::ObSEArray<common::ObString, 4> copy_headers_;
 };
 }
 }

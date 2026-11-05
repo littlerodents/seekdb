@@ -19,6 +19,8 @@
 #include "sql/engine/basic/ob_values_table_access_op.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/engine/expr/ob_obj_cast_runtime.h"
+#include "share/ob_server_struct.h"
+#include "share/schema/ob_schema_utils.h"
 
 namespace oceanbase
 {
@@ -32,13 +34,154 @@ OB_SERIALIZE_MEMBER_INHERIT(ObValuesTableAccessSpec,
                             value_exprs_,
                             start_param_idx_,
                             end_param_idx_,
-                            obj_params_);
+                            obj_params_,
+                            file_path_, file_nullstr_, file_kind_, file_header_, file_delim_,
+                            file_quote_, file_escape_, file_skip_, file_identity_, file_column_indexes_);
 
 ObValuesTableAccessOp::ObValuesTableAccessOp(ObExecContext &exec_ctx,
                                              const ObOpSpec &spec,
                                              ObOpInput *input)
   : ObOperator(exec_ctx, spec, input), datum_caster_(), cm_(CM_NONE),
-    row_idx_(0), row_cnt_(0) {}
+    row_idx_(0), row_cnt_(0), csv_reader_(nullptr), jsonl_reader_(nullptr), parquet_reader_(nullptr),
+    file_row_alloc_("FileSqlRow") {}
+
+void ObValuesTableAccessOp::close_file_reader()
+{
+  if (nullptr != csv_reader_) {
+    csv_reader_->~FileCsvStream();
+    csv_reader_ = nullptr;
+  }
+  if (nullptr != jsonl_reader_) {
+    jsonl_reader_->~FileJsonlStream();
+    jsonl_reader_ = nullptr;
+  }
+  if (nullptr != parquet_reader_) {
+    parquet_reader_->~FileParquetStream();
+    parquet_reader_ = nullptr;
+  }
+  file_row_.reset();
+  file_row_alloc_.reset();
+}
+
+void ObValuesTableAccessOp::destroy()
+{
+  close_file_reader();
+  ObOperator::destroy();
+}
+
+int ObValuesTableAccessOp::open_file_reader()
+{
+  int ret = OB_SUCCESS;
+  ObSQLSessionInfo *session = GET_MY_SESSION(ctx_);
+  bool enabled = false;
+  ObString secure_root;
+  ObString canonical;
+  FILE *file = nullptr;
+  if (nullptr == session || nullptr == GCTX.schema_service_ ||
+      MY_SPEC.file_identity_.count() != 7 ||
+      MY_SPEC.file_column_indexes_.count() != MY_SPEC.column_exprs_.count()) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(session->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL, enabled))) {
+  } else if (!enabled) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "file sql is disabled");
+  } else if (OB_FAIL(share::schema::ObSchemaUtils::get_runtime_varchar_variable(
+      *GCTX.schema_service_, share::SYS_VAR_SECURE_FILE_PRIV, ctx_.get_allocator(), secure_root))) {
+  } else if (OB_FAIL(ObFileScanUtils::open_secure_readonly(
+      ctx_.get_allocator(), MY_SPEC.file_path_, secure_root, file, canonical))) {
+  } else {
+    char delim = static_cast<char>(MY_SPEC.file_delim_);
+    char quote = static_cast<char>(MY_SPEC.file_quote_);
+    char escape = static_cast<char>(MY_SPEC.file_escape_);
+    ObFileScanOptions opts;
+    opts.header_ = MY_SPEC.file_header_;
+    opts.delim_.assign_ptr(&delim, 1);
+    opts.quote_.assign_ptr(&quote, 1);
+    opts.escape_.assign_ptr(&escape, 1);
+    opts.nullstr_ = MY_SPEC.file_nullstr_;
+    opts.skip_ = MY_SPEC.file_skip_;
+    const struct stat *snapshot = nullptr;
+    if (0 == MY_SPEC.file_kind_) {
+      void *buf = ctx_.get_allocator().alloc(sizeof(FileCsvStream));
+      if (nullptr == buf) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        csv_reader_ = new (buf) FileCsvStream();
+        ret = csv_reader_->init(file, canonical, opts);
+        file = nullptr;
+        if (OB_SUCC(ret)) {
+          snapshot = &csv_reader_->snapshot();
+          row_cnt_ = csv_reader_->row_count();
+        }
+      }
+    } else if (1 == MY_SPEC.file_kind_ || 2 == MY_SPEC.file_kind_) {
+      void *buf = ctx_.get_allocator().alloc(sizeof(FileJsonlStream));
+      if (nullptr == buf) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        jsonl_reader_ = new (buf) FileJsonlStream();
+        ret = jsonl_reader_->init(file, canonical, opts);
+        file = nullptr;
+        if (OB_SUCC(ret)) {
+          snapshot = &jsonl_reader_->snapshot();
+          row_cnt_ = jsonl_reader_->row_count();
+        }
+      }
+    } else if (3 == MY_SPEC.file_kind_) {
+      void *buf = ctx_.get_allocator().alloc(sizeof(FileParquetStream));
+      if (nullptr == buf) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        parquet_reader_ = new (buf) FileParquetStream();
+        ret = parquet_reader_->init(file, canonical);
+        file = nullptr;
+        if (OB_SUCC(ret)) {
+          snapshot = &parquet_reader_->snapshot();
+          row_cnt_ = parquet_reader_->row_count();
+        }
+      }
+    } else {
+      ret = OB_NOT_SUPPORTED;
+    }
+    if (OB_SUCC(ret)) {
+      ObSEArray<int64_t, 7> identity;
+      if (nullptr == snapshot || OB_FAIL(ObFileScanUtils::file_identity(*snapshot, identity))) {
+        if (OB_SUCCESS == ret) ret = OB_ERR_UNEXPECTED;
+      } else if (identity.count() != MY_SPEC.file_identity_.count()) {
+        ret = OB_IO_ERROR;
+      } else {
+        for (int64_t i = 0; OB_SUCC(ret) && i < identity.count(); ++i) {
+          if (identity.at(i) != MY_SPEC.file_identity_.at(i)) {
+            ret = OB_IO_ERROR;
+          }
+        }
+      }
+    }
+  }
+  if (nullptr != file) {
+    fclose(file);
+  }
+  if (OB_FAIL(ret)) {
+    close_file_reader();
+  }
+  return ret;
+}
+
+int ObValuesTableAccessOp::read_file_row()
+{
+  int ret = OB_SUCCESS;
+  file_row_alloc_.reuse();
+  if (nullptr != csv_reader_) {
+    ret = csv_reader_->next_row(file_row_alloc_, file_row_);
+  } else if (nullptr != jsonl_reader_) {
+    ret = jsonl_reader_->next_row(file_row_alloc_, file_row_);
+  } else if (nullptr != parquet_reader_) {
+    ret = parquet_reader_->next_row(file_row_alloc_, file_row_);
+  } else {
+    ret = OB_ERR_UNEXPECTED;
+  }
+  return ret;
+}
 
 int ObValuesTableAccessOp::inner_open()
 {
@@ -48,14 +191,18 @@ int ObValuesTableAccessOp::inner_open()
   ObPhysicalPlanCtx *plan_ctx = GET_PHY_PLAN_CTX(ctx_);
   if (OB_ISNULL(plan_ctx) || OB_ISNULL(ctx_.get_sql_ctx())) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (OB_UNLIKELY(MY_SPEC.column_exprs_.empty())) {
+  } else if (OB_UNLIKELY(MY_SPEC.column_exprs_.empty() &&
+                         ObValuesTableDef::ACCESS_FILE != MY_SPEC.access_type_)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(datum_caster_.init(eval_ctx_.exec_ctx_))) {
   } else if (OB_FAIL(ObSQLUtils::get_default_cast_mode(false, 0, GET_MY_SESSION(ctx_), cm_))) {
   } else {
     cm_ = cm_ | CM_COLUMN_CONVERT;
     if (OB_SUCC(ret)) {
-      if (ObValuesTableDef::FOLD_ACCESS_EXPR == MY_SPEC.access_type_) {
+      if (ObValuesTableDef::ACCESS_FILE == MY_SPEC.access_type_) {
+        if (OB_FAIL(open_file_reader())) {
+        }
+      } else if (ObValuesTableDef::FOLD_ACCESS_EXPR == MY_SPEC.access_type_) {
         if (OB_UNLIKELY(MY_SPEC.start_param_idx_ < 0 ||
                         MY_SPEC.start_param_idx_ > MY_SPEC.end_param_idx_ ||
                         MY_SPEC.end_param_idx_ >= plan_ctx->get_param_store().count())) {
@@ -84,6 +231,9 @@ int ObValuesTableAccessOp::inner_rescan()
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(ObOperator::inner_rescan())) {
+  } else if (nullptr != csv_reader_ && OB_FAIL(csv_reader_->rescan())) {
+  } else if (nullptr != jsonl_reader_ && OB_FAIL(jsonl_reader_->rescan())) {
+  } else if (nullptr != parquet_reader_ && OB_FAIL(parquet_reader_->rescan())) {
   } else {
     row_idx_ = 0;
   }
@@ -94,6 +244,9 @@ int ObValuesTableAccessOp::switch_iterator()
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(ObOperator::inner_switch_iterator())) {
+  } else if (nullptr != csv_reader_ && OB_FAIL(csv_reader_->rescan())) {
+  } else if (nullptr != jsonl_reader_ && OB_FAIL(jsonl_reader_->rescan())) {
+  } else if (nullptr != parquet_reader_ && OB_FAIL(parquet_reader_->rescan())) {
   } else {
     row_idx_ = 0;
   }
@@ -266,7 +419,8 @@ OB_INLINE int ObValuesTableAccessOp::calc_next_row()
   int64_t col_num = MY_SPEC.column_exprs_.count();
   int64_t col_idx = 0;
   ObPhysicalPlanCtx *plan_ctx = GET_PHY_PLAN_CTX(ctx_);
-  if (row_idx_ == row_cnt_) {
+  if (ObValuesTableDef::ACCESS_FILE == MY_SPEC.access_type_ && OB_FAIL(read_file_row())) {
+  } else if (ObValuesTableDef::ACCESS_FILE != MY_SPEC.access_type_ && row_idx_ == row_cnt_) {
     ret = OB_ITER_END;
   } else if (ObValuesTableDef::FOLD_ACCESS_EXPR == MY_SPEC.access_type_ &&
              OB_FAIL(plan_ctx->replace_batch_param_datum(row_idx_,
@@ -304,6 +458,14 @@ OB_INLINE int ObValuesTableAccessOp::calc_next_row()
           }
           break;
         }
+        case ObValuesTableDef::ACCESS_FILE: {
+          const int64_t index = MY_SPEC.file_column_indexes_.at(col_idx);
+          if (index < 0 || index >= file_row_.count()) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (OB_FAIL(calc_datum_from_param(file_row_.at(index), col_expr))) {
+          }
+          break;
+        }
       };
       col_idx++;
     } // while end
@@ -328,6 +490,7 @@ int ObValuesTableAccessOp::inner_close()
 {
   int ret = OB_SUCCESS;
   row_idx_ = 0;
+  close_file_reader();
   if (OB_FAIL(datum_caster_.destroy())) {
   }
   return ret;

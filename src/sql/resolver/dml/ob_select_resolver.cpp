@@ -1657,6 +1657,13 @@ int ObSelectResolver::expand_target_list(
   } else if (table_item.is_values_table()) {
     if (OB_ISNULL(get_stmt()) || OB_UNLIKELY(get_stmt()->get_column_size() == 0)) {
       ret = OB_ERR_UNEXPECTED;
+    } else if (table_item.is_file_table()) {
+      const ObIArray<ColumnItem> &all_columns = get_stmt()->get_column_items();
+      for (int64_t i = 0; OB_SUCC(ret) && i < all_columns.count(); ++i) {
+        if (all_columns.at(i).table_id_ == table_item.table_id_ &&
+            OB_FAIL(column_items.push_back(all_columns.at(i)))) {
+        }
+      }
     } else if (OB_FAIL(append(column_items, get_stmt()->get_column_items()))) {
     }
   } else {
@@ -2956,6 +2963,113 @@ int ObSelectResolver::resolve_into_line_node(const ParseNode *list_node, ObSelec
   return ret;
 }
 
+int ObSelectResolver::resolve_into_outfile_copy(const ParseNode *node,
+                                                ObSelectIntoItem &into_item)
+{
+  int ret = OB_SUCCESS;
+  bool file_sql_enabled = false;
+  if (OB_UNLIKELY(6 != node->num_child_ || 1 != node->value_
+                  || OB_ISNULL(node->children_) || OB_ISNULL(node->children_[0]))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid COPY into node", K(ret), K(node->num_child_), K(node->value_));
+  } else if (OB_ISNULL(session_info_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(session_info_->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL,
+                                                     file_sql_enabled))) {
+    LOG_WARN("get enable_file_sql failed", K(ret));
+  } else if (!file_sql_enabled) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "file sql is disabled");
+  } else if (OB_FAIL(resolve_into_const_node(node->children_[0], into_item.outfile_name_))) {
+    LOG_WARN("resolve COPY target path failed", K(ret));
+  } else {
+    // deterministic DuckDB-style CSV output defaults
+    into_item.is_copy_ = true;
+    into_item.copy_header_ = true;
+    into_item.copy_nullstr_.reset();
+    into_item.copy_delim_ = ObString(1, ",");
+    into_item.copy_quote_ = ObString(1, "\"");
+    into_item.field_str_.set_varchar(ObString(1, ","));
+    into_item.field_str_.set_collation_type(ObCharset::get_system_collation());
+    into_item.line_str_.set_varchar(ObString(1, "\n"));
+    into_item.line_str_.set_collation_type(ObCharset::get_system_collation());
+    into_item.closed_cht_.set_char_value(NULL, 0);
+    into_item.escaped_cht_.set_char_value(NULL, 0);
+    const ParseNode *opt_list = node->children_[5];
+    if (NULL != opt_list) {
+      if (OB_UNLIKELY(T_FILE_SQL_OPTION_LIST != opt_list->type_)) {
+        ret = OB_ERR_PARSER_SYNTAX;
+        LOG_WARN("invalid COPY option list", K(ret), K(opt_list->type_));
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < opt_list->num_child_; ++i) {
+        const ParseNode *opt = NULL;
+        const ParseNode *key = NULL;
+        const ParseNode *value = NULL;
+        if (OB_ISNULL(opt = opt_list->children_[i])
+            || OB_UNLIKELY(T_FILE_SQL_OPTION != opt->type_ || 2 != opt->num_child_)
+            || OB_ISNULL(key = opt->children_[0])
+            || OB_ISNULL(key->str_value_)) {
+          ret = OB_ERR_PARSER_SYNTAX;
+          LOG_WARN("invalid COPY option", K(ret), K(i));
+        } else {
+          value = opt->children_[1];
+          const ObString name(static_cast<int32_t>(key->str_len_), key->str_value_);
+          if (0 == name.case_compare("format")) {
+            if (OB_ISNULL(value) || OB_ISNULL(value->str_value_)) {
+              ret = OB_ERR_PARSER_SYNTAX;
+            } else {
+              ObString fmt(static_cast<int32_t>(value->str_len_), value->str_value_);
+              if (0 != fmt.case_compare("csv")) {
+                ret = OB_NOT_SUPPORTED;
+                LOG_USER_ERROR(OB_NOT_SUPPORTED, "COPY format other than csv");
+              }
+            }
+          } else if (0 == name.case_compare("header")) {
+            if (NULL == value) {
+              into_item.copy_header_ = true;
+            } else if ((T_BOOL == value->type_ || T_INT == value->type_)
+                       && (0 == value->value_ || 1 == value->value_)) {
+              into_item.copy_header_ = (0 != value->value_);
+            } else {
+              ret = OB_ERR_PARSER_SYNTAX;
+            }
+          } else if (0 == name.case_compare("nullstr")) {
+            if (OB_ISNULL(value) || OB_ISNULL(value->str_value_)) {
+              ret = OB_ERR_PARSER_SYNTAX;
+            } else {
+              into_item.copy_nullstr_.assign_ptr(value->str_value_,
+                                                 static_cast<int32_t>(value->str_len_));
+            }
+          } else if (0 == name.case_compare("delimiter") || 0 == name.case_compare("delim")) {
+            if (OB_ISNULL(value) || OB_ISNULL(value->str_value_) || 1 != value->str_len_) {
+              ret = OB_ERR_PARSER_SYNTAX;
+              LOG_USER_ERROR(OB_ERR_PARSER_SYNTAX, "COPY delimiter must be one character");
+            } else {
+              into_item.copy_delim_.assign_ptr(value->str_value_, 1);
+              into_item.field_str_.set_varchar(into_item.copy_delim_);
+              into_item.field_str_.set_collation_type(ObCharset::get_system_collation());
+            }
+          } else if (0 == name.case_compare("quote")) {
+            if (OB_ISNULL(value) || OB_ISNULL(value->str_value_) || 1 != value->str_len_) {
+              ret = OB_ERR_PARSER_SYNTAX;
+              LOG_USER_ERROR(OB_ERR_PARSER_SYNTAX, "COPY quote must be one character");
+            } else {
+              into_item.copy_quote_.assign_ptr(value->str_value_, 1);
+            }
+          } else if (0 == name.case_compare("sample_size")) {
+            ret = OB_NOT_SUPPORTED;
+            LOG_USER_ERROR(OB_NOT_SUPPORTED, "COPY option sample_size");
+          } else {
+            ret = OB_NOT_SUPPORTED;
+            LOG_USER_ERROR(OB_NOT_SUPPORTED, "unknown COPY option");
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 int ObSelectResolver::resolve_into_file_node(const ParseNode *list_node, ObSelectIntoItem &into_item)
 {
   int ret = OB_SUCCESS;
@@ -3110,6 +3224,10 @@ int ObSelectResolver::resolve_into_clause(const ParseNode *node)
         } else if (node->num_child_ == 3 && NULL != node->children_[1]
             && T_EXTERNAL_FILE_FORMAT == node->children_[1]->type_) { // Handle with `FORMAT`
           if (OB_FAIL(resolve_into_outfile_with_format(node, *into_item))) {
+          }
+        } else if (6 == node->num_child_ && 1 == node->value_) { // COPY (query) TO 'file' (...)
+          if (OB_FAIL(resolve_into_outfile_copy(node, *into_item))) {
+            LOG_WARN("resolve COPY options failed", K(ret));
           }
         } else { // Be compatible with grammar before
           if (OB_FAIL(resolve_into_outfile_without_format(node, *into_item))) {
