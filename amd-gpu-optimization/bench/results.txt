@@ -1,0 +1,25 @@
+# 实测记录（Radeon Cloud seekdb-hipvs 实例 rgapi-one-click-29008-ea57ae9f, 2026-11-07 UTC）
+
+## 环境
+- GPU: AMD Radeon Graphics, Card Model 0x744b, gfx1100, 48GB VRAM (rocm-smi)
+- CPU: 128 vCPU, Ubuntu 24.04, kernel 6.8.0-79-generic
+- ROCm 7.2.1; hipcc (clang); g++ -O2 -fopenmp
+
+## Run 1 — d=128, n=5000, top-32（逐查询 vs CPU）
+CPU_RESULT n=5000 d=128 topk=32 total=0.2423 checksum=2436621.88
+GPU_RESULT n=5000 d=128 topk=32 kernel_total=0.3487 topk_cpu=0.3921 total=0.7408 checksum=2436621.88
+
+## Run 2 — d=1024, n=5000, top-32（批量 vs CPU）
+CPU_RESULT n=5000 d=1024 topk=32 total=1.4203 checksum=23944755.88
+GPU_BATCHED n=5000 d=1024 topk=32 h2d=0.0306 kernel=0.5916 d2h=0.0515 topk_cpu=0.5151 total=1.1888 checksum=23944755.88
+
+## 校验门禁
+所有 CPU/GPU 成对运行的 checksum 逐位一致 → 距离与 top-k 结果等价，测量有效。
+
+## 关键比值
+- d=128 逐查询（HNSW 单点插入时序）: CPU 0.2423s vs GPU 0.7408s → GPU 0.33×（launch 往返开销主导，不推荐该时序下 GPU 卸载）
+- d=1024 批量（bulk 构建时序）: CPU 1.4203s vs GPU 1.1888s → GPU 1.19× 端到端；纯距离核 CPU≈0.90s vs GPU kernel 0.5916s → 1.53×
+
+## 历史部署证据（同型实例）
+- seekdb v1.4.0.0：SQL 验证 `5.7.25-OceanBase seekdb-v1.4.0.0`（observer ready）
+- 部署 UUID（telemetry content.id）：f131c844-3672-87d7-86f4-16ce5030aae4
