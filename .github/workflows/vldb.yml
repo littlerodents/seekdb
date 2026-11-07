@@ -1,0 +1,65 @@
+name: VLDB CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fts-large-benchmark:
+    name: fts-large-benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare task directory
+        env:
+          SEEKDB_TASK_DIR: ${{ runner.temp }}/seekdb-task
+        run: bash .github/script/seekdb/prepare.sh
+
+      - name: Compile seekdb
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          SEEKDB_TASK_DIR: ${{ runner.temp }}/seekdb-task
+          PACKAGE_TYPE: release
+          MAKE_ARGS: -j$(nproc)
+        run: bash .github/script/seekdb/compile.sh
+
+      - name: Start seekdb
+        run: |
+          python3 .github/script/seekdb/sdb.py start \
+            --binary "$GITHUB_WORKSPACE/build_release/src/observer/seekdb" \
+            --base-dir "$RUNNER_TEMP/seekdb-run"
+          python3 .github/script/seekdb/sdb.py wait-ready \
+            --base-dir "$RUNNER_TEMP/seekdb-run" --client mysql
+
+      - name: Run FTS large benchmark
+        env:
+          MYSQL: mysql -h127.0.0.1 -P2881 -uroot -N -s -A --default-character-set=utf8mb4
+          MYSQL_VERBOSE: mysql -h127.0.0.1 -P2881 -uroot -A --default-character-set=utf8mb4
+        run: |
+          REPORT_FILE=$(mktemp /tmp/fts-bench-report.XXXXXX)
+          LABEL=vldb ROWS=20000 BATCH=500 ROUNDS=3000 QUERY_ROUNDS=200 \
+            SAMPLES=3 WARMUP=30 SKIP_LOAD=0 OUTPUT="$REPORT_FILE" \
+            bash tools/benchmark/fts_large_bench.sh
+          python3 tools/benchmark/fts_large_bench_score.py "$REPORT_FILE"
+          cp "$REPORT_FILE" "$GITHUB_WORKSPACE/fts_large_bench_report.txt"
+
+      - name: Upload FTS benchmark artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vldb-fts-large-benchmark
+          path: fts_large_bench_report.txt
+
+      - name: Stop seekdb
+        if: always()
+        run: |
+          python3 .github/script/seekdb/sdb.py stop --base-dir "$RUNNER_TEMP/seekdb-run" || true
