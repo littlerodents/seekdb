@@ -17,7 +17,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "sql/engine/dml/ob_ai_column_dml_service.h"
-#include "lib/hash/ob_md5.h"
+#include <openssl/evp.h>
 #include "lib/time/ob_time_utility.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/engine/expr/ob_expr.h"
@@ -94,13 +94,12 @@ void hex_encode(const ObString &src, ObSqlString &dst)
 int md5_hex(const ObString &seed, char *buf, const int64_t buf_len)
 {
   int ret = OB_SUCCESS;
-  ObMd5 md5;
-  unsigned char digest[16] = {0};
+  unsigned char digest[EVP_MAX_MD_SIZE] = {0};
+  unsigned int digest_len = 0;
   if (OB_ISNULL(buf) || buf_len < 33) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    md5.update(seed.ptr(), static_cast<int32_t>(seed.length()));
-    md5.final(digest);
+    (void)EVP_Digest(seed.ptr(), static_cast<size_t>(seed.length()), digest, &digest_len, EVP_md5(), NULL);
     static const char *hex_chars = "0123456789abcdef";
     for (int64_t i = 0; i < 16; ++i) {
       buf[i * 2] = hex_chars[(digest[i] >> 4) & 0xF];
