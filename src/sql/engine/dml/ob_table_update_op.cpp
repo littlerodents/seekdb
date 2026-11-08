@@ -349,7 +349,7 @@ OB_INLINE int ObTableUpdateOp::update_row_to_das()
       } else if (ai_hook_active_ && 0 == j
                  && OB_FAIL(ObAIColumnDMLService::collect_written_rowkey(
                      ctx_.get_allocator(), eval_ctx_, ai_pk_names_,
-                     upd_ctdef.full_row_, upd_ctdef.das_ctdef_.rowkey_cnt_,
+                     upd_ctdef.full_row_, upd_ctdef.dupd_ctdef_.rowkey_cnt_,
                      ai_rowkey_preds_, ai_rowkey_encs_))) {
         LOG_WARN("fail to collect rowkey for ai column maintenance", K(ret));
       } else if (need_after_row_process(upd_ctdef) && OB_FAIL(dml_modify_rows_.push_back(modify_row))) {

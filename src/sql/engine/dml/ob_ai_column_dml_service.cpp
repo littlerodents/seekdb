@@ -61,7 +61,7 @@ int obj_to_sql_literal(const ObObj &obj, ObSqlString &dst)
 {
   int ret = OB_SUCCESS;
   if (obj.is_null()) {
-    OB_FAIL_CODE(ret = (void)("NULL");
+    ret = dst.append("NULL");
   } else if (obj.is_integer_type() || obj.is_float() || obj.is_double()
              || obj.is_numeric_type()) {
     ObString num_str;
@@ -81,8 +81,9 @@ int obj_to_sql_literal(const ObObj &obj, ObSqlString &dst)
   return ret;
 }
 
-void hex_encode(const ObString &src, ObSqlString &dst)
+int hex_encode(const ObString &src, ObSqlString &dst)
 {
+  int ret = OB_SUCCESS;
   static const char *hex_chars = "0123456789abcdef";
   for (int64_t i = 0; i < src.length(); ++i) {
     const uint8_t b = static_cast<uint8_t>(src.ptr()[i]);
@@ -91,6 +92,7 @@ void hex_encode(const ObString &src, ObSqlString &dst)
     dst.append(&h0, 1);
     dst.append(&h1, 1);
   }
+  return ret;
 }
 
 int md5_hex(const ObString &seed, char *buf, const int64_t buf_len)
