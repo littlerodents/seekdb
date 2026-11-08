@@ -73,9 +73,9 @@ int obj_to_sql_literal(const ObObj &obj, ObSqlString &dst)
     ObString text;
     if (OB_FAIL(obj.get_string(text))) {
       LOG_WARN("fail to get text form", K(ret), K(obj));
-    } else if (OB_FAIL(dst.append("\"", 1))) {
+    } else if (OB_FAIL(dst.append("'", 1))) {
     } else if (OB_FAIL(escape_string(text, dst))) {
-    } else if (OB_FAIL(dst.append("\"", 1))) {
+    } else if (OB_FAIL(dst.append("'", 1))) {
     }
   }
   return ret;
