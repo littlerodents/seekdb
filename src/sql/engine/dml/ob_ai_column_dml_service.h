@@ -23,12 +23,6 @@
 
 namespace oceanbase
 {
-namespace sql
-{
-
-class ObExecContext;
-class ObExpr;
-class ObEvalCtx;
 
 namespace share
 {
@@ -39,6 +33,13 @@ class ObSchemaGetterGuard;
 class ObAIColumnInfo;
 }
 }
+
+namespace sql
+{
+
+class ObExecContext;
+class ObExpr;
+class ObEvalCtx;
 
 // Runtime maintenance of AI columns during user DML. All work is done through
 // nested SQL executed on the user's own session (same transaction), so task
