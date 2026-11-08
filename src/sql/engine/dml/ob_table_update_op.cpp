@@ -206,7 +206,7 @@ OB_INLINE int ObTableUpdateOp::open_table_for_each()
   ai_rowkey_encs_.reset();
   if (OB_UNLIKELY(MY_SPEC.upd_ctdefs_.count() > 0 && !MY_SPEC.upd_ctdefs_.at(0).empty())) {
     const ObUpdCtDef &primary_ctdef = *MY_SPEC.upd_ctdefs_.at(0).at(0);
-    ai_hook_table_id_ = primary_ctdef.das_ctdef_.table_id_;
+    ai_hook_table_id_ = primary_ctdef.dupd_ctdef_.table_id_;
     if (OB_FAIL(ObAIColumnDMLService::on_write_op_open(ctx_, ai_hook_table_id_,
                                                        ai_pk_names_, ai_hook_active_))) {
       LOG_WARN("fail to activate ai column hook", K(ret));

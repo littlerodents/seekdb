@@ -61,7 +61,7 @@ int obj_to_sql_literal(const ObObj &obj, ObSqlString &dst)
 {
   int ret = OB_SUCCESS;
   if (obj.is_null()) {
-    ret = dst.append("NULL");
+    OB_FAIL_CODE(ret = (void)("NULL");
   } else if (obj.is_integer_type() || obj.is_float() || obj.is_double()
              || obj.is_numeric_type()) {
     ObString num_str;
@@ -86,8 +86,10 @@ void hex_encode(const ObString &src, ObSqlString &dst)
   static const char *hex_chars = "0123456789abcdef";
   for (int64_t i = 0; i < src.length(); ++i) {
     const uint8_t b = static_cast<uint8_t>(src.ptr()[i]);
-    dst.append(hex_chars[(b >> 4) & 0xF]);
-    dst.append(hex_chars[b & 0xF]);
+    char h0 = hex_chars[(b >> 4) & 0xF];
+    char h1 = hex_chars[b & 0xF];
+    dst.append(&h0, 1);
+    dst.append(&h1, 1);
   }
 }
 
@@ -240,7 +242,7 @@ int ObAIColumnDMLService::collect_written_rowkey(common::ObIAllocator &alloc,
         ret = OB_ERR_UNEXPECTED;
       } else {
         ObObj obj;
-        if (OB_FAIL(datum->to_obj(obj, expr->obj_meta_, expr->datum_meta_))) {
+        if (OB_FAIL(datum->to_obj(obj, expr->obj_meta_))) {
           LOG_WARN("fail to convert datum to obj", K(ret));
         } else {
           ObSqlString literal;
