@@ -51,7 +51,7 @@ int escape_string(const ObString &src, ObSqlString &dst)
     } else if ('\\' == c) {
       if (OB_FAIL(dst.append("\\\\"))) {
       }
-    } else if (OB_FAIL(dst.append(c))) {
+    } else if (OB_FAIL(dst.append(&c, 1))) {
     }
   }
   return ret;
@@ -67,15 +67,15 @@ int obj_to_sql_literal(const ObObj &obj, ObSqlString &dst)
     ObString num_str;
     if (OB_FAIL(obj.get_varchar(num_str))) {
       LOG_WARN("fail to get numeric text", K(ret), K(obj));
-    } else if (OB_FAIL(dst.append(num_str))) {
+    } else if (OB_FAIL(dst.append(num_str.ptr(), num_str.length()))) {
     }
   } else {
     ObString text;
     if (OB_FAIL(obj.get_string(text))) {
       LOG_WARN("fail to get text form", K(ret), K(obj));
-    } else if (OB_FAIL(dst.append('\''))) {
+    } else if (OB_FAIL(dst.append("\"", 1))) {
     } else if (OB_FAIL(escape_string(text, dst))) {
-    } else if (OB_FAIL(dst.append('\''))) {
+    } else if (OB_FAIL(dst.append("\"", 1))) {
     }
   }
   return ret;
@@ -121,6 +121,26 @@ int get_table_schema(ObExecContext &ctx, const uint64_t table_id,
     // no schema guard available (e.g. inner statements); skip
   } else if (OB_FAIL(guard->get_table_schema(table_id, table_schema))) {
     LOG_WARN("fail to get table schema", K(ret), K(table_id));
+  }
+  return ret;
+}
+
+
+int get_database_name(ObExecContext &ctx, const ObTableSchema &table_schema,
+                      common::ObString &db_name)
+{
+  int ret = OB_SUCCESS;
+  const ObSqlCtx *sql_ctx = ctx.get_sql_ctx();
+  ObSchemaGetterGuard *guard = OB_NOT_NULL(sql_ctx) ? sql_ctx->schema_guard_ : NULL;
+  const share::schema::ObDatabaseSchema *db_schema = NULL;
+  if (OB_ISNULL(guard)) {
+    ret = OB_SCHEMA_ERROR;
+  } else if (OB_FAIL(guard->get_database_schema(table_schema.get_database_id(), db_schema))) {
+    LOG_WARN("fail to get database schema", K(ret), "db_id", table_schema.get_database_id());
+  } else if (OB_ISNULL(db_schema)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    db_name = db_schema->get_database_name_str();
   }
   return ret;
 }
@@ -229,10 +249,10 @@ int ObAIColumnDMLService::collect_written_rowkey(common::ObIAllocator &alloc,
             // text form for encoding
             ObSqlString text;
             if (obj.is_null()) {
-              text.append("NULL");
+              (void)text.append("NULL");
             } else if (obj.is_integer_type() || obj.is_float() || obj.is_double()
                        || obj.is_numeric_type()) {
-              text.append(literal.string());
+              (void)text.append(literal.string().ptr(), literal.string().length());
             } else {
               ObString sv;
               if (OB_SUCC(obj.get_string(sv))) {
@@ -244,8 +264,8 @@ int ObAIColumnDMLService::collect_written_rowkey(common::ObIAllocator &alloc,
             } else if (OB_FAIL(pred.append_fmt("`%.*s` = ",
                                                static_cast<int>(pk_names.at(i).length()),
                                                pk_names.at(i).ptr()))) {
-            } else if (OB_FAIL(pred.append(literal.string()))) {
-            } else if (i > 0 && OB_FAIL(enc.append(':'))) {
+            } else if (OB_FAIL(pred.append(literal.string().ptr(), literal.string().length()))) {
+            } else if (i > 0 && OB_FAIL(enc.append(":", 1))) {
             } else if (OB_FAIL(ob_ai::hex_encode(text.string(), enc))) {
             }
           }
@@ -281,8 +301,12 @@ int ObAIColumnDMLService::finish_write(ObExecContext &ctx,
     } else if (OB_ISNULL(table_schema) || !table_schema->has_ai_column()) {
       // not an AI table
     } else {
-      const ObString &db_name = table_schema->get_database_name_str();
+      ObString db_name;
       const ObString &tb_name = table_schema->get_table_name_str();
+        if (OB_FAIL(ret)) {
+        } else if (OB_FAIL(ob_ai::get_database_name(ctx, *table_schema, db_name))) {
+          LOG_WARN(\"fail to get database name\", K(ret));
+        }
       if (db_name.empty() || tb_name.empty()) {
         // cannot address the table
       } else {
@@ -412,8 +436,12 @@ int ObAIColumnDMLService::execute_ai_column_retry(ObExecContext &ctx,
   } else if (OB_ISNULL(table_schema)) {
     ret = OB_TABLE_NOT_EXIST;
   } else {
-    const ObString &db_name = table_schema->get_database_name_str();
+    ObString db_name;
     const ObString &tb_name = table_schema->get_table_name_str();
+        if (OB_FAIL(ret)) {
+        } else if (OB_FAIL(ob_ai::get_database_name(ctx, *table_schema, db_name))) {
+          LOG_WARN(\"fail to get database name\", K(ret));
+        }
     const ObAIColumnInfo *ai_info = NULL;
     for (int64_t i = 0; OB_ISNULL(ai_info) && i < table_schema->get_ai_columns().count(); ++i) {
       if (0 == column_name.case_compare(table_schema->get_ai_columns().at(i).column_name_)) {
@@ -537,14 +565,18 @@ int ObAIColumnDMLService::check_strict_read(ObExecContext &ctx,
       for (int64_t i = 0; OB_SUCC(ret) && i < table_ids.count(); ++i) {
         SMART_VAR(ObMySQLProxy::MySQLResult, res)
         {
-          ObMySQLResult *result = NULL;
+          common::sqlclient::ObMySQLResult *result = NULL;
           const ObTableSchema *table_schema = NULL;
           if (OB_FAIL(ob_ai::get_table_schema(ctx, table_ids.at(i), table_schema))) {
           } else if (OB_ISNULL(table_schema)) {
             // table vanished; let the main query report it
           } else {
-            const ObString &db_name = table_schema->get_database_name_str();
+            ObString db_name;
             const ObString &tb_name = table_schema->get_table_name_str();
+        if (OB_FAIL(ret)) {
+        } else if (OB_FAIL(ob_ai::get_database_name(ctx, *table_schema, db_name))) {
+          LOG_WARN(\"fail to get database name\", K(ret));
+        }
             ObSqlString state_col;
             ObSqlString request_col;
             ObSqlString result_spec_col;
