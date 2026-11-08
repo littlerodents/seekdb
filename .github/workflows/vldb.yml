@@ -29,7 +29,7 @@ jobs:
           GITHUB_WORKSPACE: ${{ github.workspace }}
           SEEKDB_TASK_DIR: ${{ runner.temp }}/seekdb-task
           PACKAGE_TYPE: release
-          MAKE_ARGS: -j$(nproc)
+          MAKE_ARGS: -j2
         run: bash .github/script/seekdb/compile.sh
 
       - name: Start seekdb
