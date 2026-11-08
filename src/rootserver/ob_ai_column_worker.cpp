@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#define USING_LOG_PREFIX ROOT_RS
+#define USING_LOG_PREFIX RS
 
 #include "lib/oblog/ob_log.h"
 #include "lib/oblog/ob_log_module.h"
@@ -66,7 +66,7 @@ int escape_string(const ObString &src, ObSqlString &dst)
     } else if ('\\' == c) {
       ret = dst.append("\\\\");
     } else {
-      ret = dst.append(c);
+      ret = dst.append(&c, 1);
     }
   }
   return ret;
@@ -75,9 +75,9 @@ int escape_string(const ObString &src, ObSqlString &dst)
 int write_quoted(const ObString &src, ObSqlString &dst)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(dst.append('\''))) {
+  if (OB_FAIL(dst.append("\"", 1))) {
   } else if (OB_FAIL(escape_string(src, dst))) {
-  } else if (OB_FAIL(dst.append('\''))) {
+  } else if (OB_FAIL(dst.append("\"", 1))) {
   }
   return ret;
 }
@@ -266,9 +266,22 @@ int ObAIColumnWorker::process_group(common::ObIAllocator &alloc,
                                     const common::ObIArray<TaskItem> &group)
 {
   int ret = OB_SUCCESS;
-  const ObString &db_name = table_schema.get_database_name_str();
   const ObString &tb_name = table_schema.get_table_name_str();
-  if (OB_UNLIKELY(group.empty() || db_name.empty() || tb_name.empty())) {
+  share::schema::ObSchemaGetterGuard db_guard;
+  const ObString *db_name_ptr = NULL;
+  ObString db_name;
+  if (OB_FAIL(schema_service_->get_runtime_schema_guard(db_guard))) {
+    LOG_WARN("fail to get schema guard for db name", K(ret));
+  } else if (OB_FAIL(db_guard.get_database_name(table_schema.get_database_id(), db_name_ptr))) {
+    LOG_WARN("fail to get database name", K(ret), "db_id", table_schema.get_database_id());
+  } else if (OB_ISNULL(db_name_ptr)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("null database name", K(ret), "db_id", table_schema.get_database_id());
+  } else {
+    db_name = *db_name_ptr;
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_UNLIKELY(group.empty() || db_name.empty() || tb_name.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else {
     const ObString &pred = group.at(0).rowkey_predicate_;
