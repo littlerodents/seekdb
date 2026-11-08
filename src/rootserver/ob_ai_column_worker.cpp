@@ -268,17 +268,17 @@ int ObAIColumnWorker::process_group(common::ObIAllocator &alloc,
   int ret = OB_SUCCESS;
   const ObString &tb_name = table_schema.get_table_name_str();
   share::schema::ObSchemaGetterGuard db_guard;
-  const ObString *db_name_ptr = NULL;
+  const share::schema::ObDatabaseSchema *db_schema = NULL;
   ObString db_name;
   if (OB_FAIL(schema_service_->get_runtime_schema_guard(db_guard))) {
     LOG_WARN("fail to get schema guard for db name", K(ret));
-  } else if (OB_FAIL(db_guard.get_database_name(table_schema.get_database_id(), db_name_ptr))) {
-    LOG_WARN("fail to get database name", K(ret), "db_id", table_schema.get_database_id());
-  } else if (OB_ISNULL(db_name_ptr)) {
+  } else if (OB_FAIL(db_guard.get_database_schema(table_schema.get_database_id(), db_schema))) {
+    LOG_WARN("fail to get database schema", K(ret), "db_id", table_schema.get_database_id());
+  } else if (OB_ISNULL(db_schema)) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("null database name", K(ret), "db_id", table_schema.get_database_id());
+    LOG_WARN("null database schema", K(ret), "db_id", table_schema.get_database_id());
   } else {
-    db_name = *db_name_ptr;
+    db_name = db_schema->get_database_name_str();
   }
   if (OB_FAIL(ret)) {
   } else if (OB_UNLIKELY(group.empty() || db_name.empty() || tb_name.empty())) {
