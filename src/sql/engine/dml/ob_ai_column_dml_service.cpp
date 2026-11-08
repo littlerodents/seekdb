@@ -305,7 +305,7 @@ int ObAIColumnDMLService::finish_write(ObExecContext &ctx,
       const ObString &tb_name = table_schema->get_table_name_str();
         if (OB_FAIL(ret)) {
         } else if (OB_FAIL(ob_ai::get_database_name(ctx, *table_schema, db_name))) {
-          LOG_WARN(\"fail to get database name\", K(ret));
+          LOG_WARN("fail to get database name", K(ret));
         }
       if (db_name.empty() || tb_name.empty()) {
         // cannot address the table
@@ -440,7 +440,7 @@ int ObAIColumnDMLService::execute_ai_column_retry(ObExecContext &ctx,
     const ObString &tb_name = table_schema->get_table_name_str();
         if (OB_FAIL(ret)) {
         } else if (OB_FAIL(ob_ai::get_database_name(ctx, *table_schema, db_name))) {
-          LOG_WARN(\"fail to get database name\", K(ret));
+          LOG_WARN("fail to get database name", K(ret));
         }
     const ObAIColumnInfo *ai_info = NULL;
     for (int64_t i = 0; OB_ISNULL(ai_info) && i < table_schema->get_ai_columns().count(); ++i) {
@@ -575,7 +575,7 @@ int ObAIColumnDMLService::check_strict_read(ObExecContext &ctx,
             const ObString &tb_name = table_schema->get_table_name_str();
         if (OB_FAIL(ret)) {
         } else if (OB_FAIL(ob_ai::get_database_name(ctx, *table_schema, db_name))) {
-          LOG_WARN(\"fail to get database name\", K(ret));
+          LOG_WARN("fail to get database name", K(ret));
         }
             ObSqlString state_col;
             ObSqlString request_col;
