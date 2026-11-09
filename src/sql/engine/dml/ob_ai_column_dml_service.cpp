@@ -442,10 +442,14 @@ int ObAIColumnDMLService::execute_ai_column_retry(ObExecContext &ctx,
   } else {
     ObString db_name;
     const ObString &tb_name = table_schema->get_table_name_str();
+    LOG_WARN("AITRACE: retry entry", K(table_id), K(column_name),
+             "ai_columns", table_schema->get_ai_columns().count(),
+             "columns", table_schema->get_column_count(), K(predicate));
         if (OB_FAIL(ret)) {
         } else if (OB_FAIL(ob_ai::get_database_name(ctx, *table_schema, db_name))) {
           LOG_WARN("fail to get database name", K(ret));
         }
+    LOG_WARN("AITRACE: db name resolved", K(ret), K(db_name), K(tb_name));
     const ObAIColumnInfo *ai_info = NULL;
     for (int64_t i = 0; OB_ISNULL(ai_info) && i < table_schema->get_ai_columns().count(); ++i) {
       if (0 == column_name.case_compare(table_schema->get_ai_columns().at(i).column_name_)) {
@@ -458,12 +462,18 @@ int ObAIColumnDMLService::execute_ai_column_retry(ObExecContext &ctx,
     } else if (db_name.empty() || tb_name.empty()) {
       ret = OB_ERR_UNEXPECTED;
     } else {
+      LOG_WARN("AITRACE: ai info found", "column_id", ai_info->column_id_);
       sqlclient::ObISQLConnectionGuard conn_guard;
       sqlclient::ObISQLConnection *conn = NULL;
       int64_t affected = 0;
       const int64_t stmt_token = ObTimeUtility::current_time();
       if (OB_FAIL(ob_ai::open_nested_conn(ctx.get_my_session(), conn_guard, conn))) {
+        LOG_WARN("AITRACE: open_nested_conn failed", K(ret));
+      } else if (OB_ISNULL(conn)) {
+        ret = OB_INNER_STAT_ERROR;
+        LOG_WARN("AITRACE: nested conn is null", K(ret));
       } else {
+        LOG_WARN("AITRACE: nested conn ready");
         // build rowkey expression text for rowkey_enc / rowkey_predicate columns in SQL
         ObSqlString pred_expr;
         ObSqlString enc_expr;
