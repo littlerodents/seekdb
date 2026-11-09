@@ -63,10 +63,14 @@ private:
                        const char *table_name,
                        const share::ObDMLSqlSplicer &dml,
                        const int64_t target_affected_row_count);
-  static int set_history_defaults_(share::ObDMLSqlSplicer &dml, const int64_t schema_version);
+  // __all_ai_column and __all_ai_column_history disagree on their column sets:
+  // only the history table carries schema_version and is_deleted, so one splicer
+  // cannot serve both.
   static int gen_ai_column_dml(const ObTableSchema &table_schema,
                                const ObColumnSchemaV2 &column,
                                const ObAIColumnInfo &ai_info,
+                               const bool for_history,
+                               const int64_t schema_version,
                                share::ObDMLSqlSplicer &dml);
 };
 

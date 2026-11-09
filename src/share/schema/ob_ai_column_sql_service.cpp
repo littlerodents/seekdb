@@ -47,12 +47,20 @@ int ObAIColumnSqlService::hidden_ai_column_names(const ObString &column_name,
 int ObAIColumnSqlService::gen_ai_column_dml(const ObTableSchema &table_schema,
                                             const ObColumnSchemaV2 &column,
                                             const ObAIColumnInfo &ai_info,
+                                            const bool for_history,
+                                            const int64_t schema_version,
                                             share::ObDMLSqlSplicer &dml)
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(dml.add_pk_column("table_id", table_schema.get_table_id()))
-      || OB_FAIL(dml.add_pk_column("column_id", column.get_column_id()))
-      || OB_FAIL(dml.add_column("column_name", ObHexEscapeSqlStr(ai_info.column_name_)))
+      || OB_FAIL(dml.add_pk_column("column_id", column.get_column_id()))) {
+    LOG_WARN("fail to add ai column row keys", K(ret));
+  } else if (for_history
+             && (OB_FAIL(dml.add_pk_column("schema_version", schema_version))
+                 || OB_FAIL(dml.add_column("is_deleted", static_cast<int64_t>(0))))) {
+    // __all_ai_column_history carries these two and neither has a usable default.
+    LOG_WARN("fail to add ai column history columns", K(ret), K(schema_version));
+  } else if (OB_FAIL(dml.add_column("column_name", ObHexEscapeSqlStr(ai_info.column_name_)))
       || OB_FAIL(dml.add_column("state_column_id", ai_info.state_column_id_))
       || OB_FAIL(dml.add_column("request_column_id", ai_info.request_column_id_))
       || OB_FAIL(dml.add_column("result_spec_column_id", ai_info.result_spec_column_id_))
@@ -124,6 +132,7 @@ int ObAIColumnSqlService::add_ai_columns(common::ObISQLClient &sql_client,
   if (OB_FAIL(check_ddl_allowed_(table_schema))) {
   } else {
     ObDMLSqlSplicer dml;
+    ObDMLSqlSplicer history_dml;
     int64_t row_count = 0;
     for (ObTableSchema::const_column_iterator iter = table_schema.column_begin();
         OB_SUCC(ret) && iter != table_schema.column_end(); ++iter) {
@@ -137,8 +146,12 @@ int ObAIColumnSqlService::add_ai_columns(common::ObISQLClient &sql_client,
           ObAIColumnInfo ai_info;
           if (OB_FAIL(resolve_ai_column_info(table_schema, column, ai_info))) {
             LOG_WARN("fail to resolve ai column info", K(ret));
-          } else if (OB_FAIL(gen_ai_column_dml(table_schema, column, ai_info, dml))) {
+          } else if (OB_FAIL(gen_ai_column_dml(table_schema, column, ai_info,
+                                              false /* for_history */, schema_version, dml))) {
             LOG_WARN("fail to gen ai column dml", K(ret));
+          } else if (OB_FAIL(gen_ai_column_dml(table_schema, column, ai_info,
+                                              true /* for_history */, schema_version, history_dml))) {
+            LOG_WARN("fail to gen ai column history dml", K(ret));
           } else {
             row_count++;
           }
@@ -146,14 +159,9 @@ int ObAIColumnSqlService::add_ai_columns(common::ObISQLClient &sql_client,
       }
     }
     if (OB_SUCC(ret) && row_count > 0) {
-      // is_deleted and schema_version carry no table default, so they have to be
-      // part of the row before the first insert; filling them afterwards leaves the
-      // insert short a value (1364).
-      if (OB_FAIL(set_history_defaults_(dml, schema_version))) {
-        LOG_WARN("fail to set default columns", K(ret));
-      } else if (OB_FAIL(exec_dml_(sql_client, OB_ALL_AI_COLUMN_TNAME, dml, row_count))) {
+      if (OB_FAIL(exec_dml_(sql_client, OB_ALL_AI_COLUMN_TNAME, dml, row_count))) {
         LOG_WARN("fail to insert __all_ai_column", K(ret));
-      } else if (OB_FAIL(exec_dml_(sql_client, OB_ALL_AI_COLUMN_HISTORY_TNAME, dml, row_count))) {
+      } else if (OB_FAIL(exec_dml_(sql_client, OB_ALL_AI_COLUMN_HISTORY_TNAME, history_dml, row_count))) {
         LOG_WARN("fail to insert __all_ai_column_history", K(ret));
       }
     }
@@ -172,16 +180,19 @@ int ObAIColumnSqlService::add_single_ai_column(common::ObISQLClient &sql_client,
     ret = OB_INVALID_ARGUMENT;
   } else {
     ObDMLSqlSplicer dml;
+    ObDMLSqlSplicer history_dml;
     ObAIColumnInfo ai_info;
     if (OB_FAIL(resolve_ai_column_info(table_schema, column, ai_info))) {
       LOG_WARN("fail to resolve ai column info", K(ret));
-    } else if (OB_FAIL(gen_ai_column_dml(table_schema, column, ai_info, dml))) {
+    } else if (OB_FAIL(gen_ai_column_dml(table_schema, column, ai_info,
+                                        false /* for_history */, schema_version, dml))) {
       LOG_WARN("fail to gen ai column dml", K(ret));
-    } else if (OB_FAIL(set_history_defaults_(dml, schema_version))) {
-      LOG_WARN("fail to set default columns", K(ret));
+    } else if (OB_FAIL(gen_ai_column_dml(table_schema, column, ai_info,
+                                        true /* for_history */, schema_version, history_dml))) {
+      LOG_WARN("fail to gen ai column history dml", K(ret));
     } else if (OB_FAIL(exec_dml_(sql_client, OB_ALL_AI_COLUMN_TNAME, dml, 1))) {
       LOG_WARN("fail to insert __all_ai_column", K(ret));
-    } else if (OB_FAIL(exec_dml_(sql_client, OB_ALL_AI_COLUMN_HISTORY_TNAME, dml, 1))) {
+    } else if (OB_FAIL(exec_dml_(sql_client, OB_ALL_AI_COLUMN_HISTORY_TNAME, history_dml, 1))) {
       LOG_WARN("fail to insert __all_ai_column_history", K(ret));
     }
   }
@@ -216,17 +227,6 @@ int ObAIColumnSqlService::drop_ai_columns(common::ObISQLClient &sql_client,
     } else if (OB_FAIL(sql_client.write(sql.ptr(), affected_rows))) {
       LOG_WARN("fail to delete ai column task rows", K(ret), K(table_id));
     }
-  }
-  return ret;
-}
-
-int ObAIColumnSqlService::set_history_defaults_(share::ObDMLSqlSplicer &dml, const int64_t schema_version)
-{
-  int ret = OB_SUCCESS;
-  ObSqlString schema_version_str;
-  if (OB_FAIL(schema_version_str.assign_fmt("%ld", schema_version))) {
-  } else if (OB_FAIL(dml.set_default_columns("is_deleted", "0"))) {
-  } else if (OB_FAIL(dml.set_default_columns("schema_version", schema_version_str.ptr()))) {
   }
   return ret;
 }
