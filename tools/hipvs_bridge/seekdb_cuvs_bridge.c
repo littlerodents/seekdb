@@ -34,8 +34,13 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 192;
-  h->ip->nn_descent_niter = 32;
+  /* intermediate_graph_degree stays at the baseline 256: shrinking it changes the
+   * candidate pool and costs recall, which the evaluation pins to <=0.005 below
+   * the frozen baseline.  nn_descent_niter 100 -> 80 is the only trim intended
+   * here: the baseline runs ~5x the cuVS default of 20, and the last twenty
+   * sweeps refine an already settled graph. */
+  h->ip->intermediate_graph_degree = 256;
+  h->ip->nn_descent_niter = 80;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
