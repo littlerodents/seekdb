@@ -828,9 +828,6 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
             } else {
               ObColumnNameHashWrapper name_key(tmp_col->get_column_name_str());
               if (OB_FAIL(column_name_set_.set_refactored(name_key))) {
-              } else if (column.is_ai_column()
-                         && OB_FAIL(add_ai_hidden_columns(table_schema, column))) {
-                SQL_RESV_LOG(WARN, "fail to add hidden columns for ai column", K(ret));
               } else {
                 ret = OB_SUCCESS;
               }
@@ -938,6 +935,28 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
         table_schema.set_max_used_column_id(cur_column_id_);
         if (0 != autoinc_column_id) {
           table_schema.set_autoinc_column_id(autoinc_column_id);
+        }
+      }
+    }
+
+    // Hidden backing columns of AI columns are appended only now that every user
+    // column holds its final id.  Creating them inside the column loop would hand
+    // out ids that a later user column still claims.
+    if (OB_SUCC(ret) && RESOLVE_NON_COL != resolve_rule) {
+      ObSEArray<ObString, 8> ai_column_names;
+      const int64_t column_count = table_schema.get_column_count();
+      for (int64_t i = 0; OB_SUCC(ret) && i < column_count; ++i) {
+        const ObColumnSchemaV2 *column = table_schema.get_column_schema_by_idx(i);
+        if (OB_ISNULL(column)) {
+          ret = OB_ERR_UNEXPECTED;
+          SQL_RESV_LOG(WARN, "column schema is null", K(ret), K(i));
+        } else if (column->is_ai_column()
+                   && OB_FAIL(ai_column_names.push_back(column->get_column_name_str()))) {
+        }
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < ai_column_names.count(); ++i) {
+        if (OB_FAIL(add_ai_hidden_columns(table_schema, ai_column_names.at(i)))) {
+          SQL_RESV_LOG(WARN, "fail to add hidden columns for ai column", K(ret));
         }
       }
     }

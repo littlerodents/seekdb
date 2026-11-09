@@ -11182,9 +11182,17 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &node, TableItem *&ta
         (kind == 0 && 0 == opts.format_.case_compare("csv")) ||
         ((kind == 1 || kind == 2) && 0 == opts.format_.case_compare("newline_delimited"));
     if (opts.delim_.length() != 1 || opts.quote_.length() != 1 || opts.escape_.length() != 1) {
-      ret = OB_ERR_PARSER_SYNTAX;
+      // Complain the same way the parser does for an unusable argument list: MySQL
+      // reports these as 1064 (ER_PARSE_ERROR), not OceanBase's 1149.
+      ret = OB_ERR_PARSE_SQL;
+      LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX),
+                     static_cast<int>(node.children_[1]->str_len_),
+                     node.children_[1]->str_value_, 0);
     } else if (!supported_format) {
-      ret = OB_ERR_PARSER_SYNTAX;
+      ret = OB_ERR_PARSE_SQL;
+      LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX),
+                     static_cast<int>(node.children_[1]->str_len_),
+                     node.children_[1]->str_value_, 0);
     } else if (kind < 0 || kind > 4) {
       ret = OB_NOT_SUPPORTED;
       LOG_USER_ERROR(OB_NOT_SUPPORTED, "file format");

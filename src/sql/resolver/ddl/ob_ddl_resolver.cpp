@@ -6018,8 +6018,18 @@ int ObDDLResolver::resolve_ai_column_definition(ObColumnSchemaV2 &column,
                          static_cast<int>(sizeof("ai column requires a model name and an input expression") - 1),
                          "ai column requires a model name and an input expression");
         } else {
-          const bool is_vector_col =
-              (common::ObUserDefinedSQLType == column.get_data_type());
+          // `vector(N)` is parsed as T_COLLECTION and resolved to ObCollectionSQLType,
+          // not ObUserDefinedSQLType, so testing the data type alone never matches a
+          // vector column.  Confirm the collection really is a vector by asking the
+          // dimension out of its extended type info.
+          bool is_vector_col = false;
+          if (common::ObCollectionSQLType == column.get_data_type()) {
+            int64_t probe_dim = -1;
+            if (OB_SUCCESS == ObVectorIndexUtil::get_vector_dim_from_extend_type_info(
+                    column.get_extended_type_info(), probe_dim)) {
+              is_vector_col = probe_dim > 0;
+            }
+          }
           const bool is_json_col = column.is_json();
           const bool is_int_col = column.get_meta_type().is_integer_type();
           if (is_complete && is_vector_col) {
@@ -6208,7 +6218,7 @@ int ObDDLResolver::resolve_ai_column_definition(ObColumnSchemaV2 &column,
 }
 
 int ObDDLResolver::add_ai_hidden_columns(ObTableSchema &table_schema,
-                                         const ObColumnSchemaV2 &ai_column)
+                                         const common::ObString &ai_column_name)
 {
   int ret = OB_SUCCESS;
   if (OB_ISNULL(allocator_)) {
@@ -6217,7 +6227,7 @@ int ObDDLResolver::add_ai_hidden_columns(ObTableSchema &table_schema,
     ObSqlString state_name;
     ObSqlString request_name;
     ObSqlString result_spec_name;
-    if (OB_FAIL(ObAIColumnSqlService::hidden_ai_column_names(ai_column.get_column_name_str(),
+    if (OB_FAIL(ObAIColumnSqlService::hidden_ai_column_names(ai_column_name,
                                                              state_name, request_name, result_spec_name))) {
       SQL_RESV_LOG(WARN, "fail to build hidden column names", K(ret));
     } else {
@@ -6225,6 +6235,11 @@ int ObDDLResolver::add_ai_hidden_columns(ObTableSchema &table_schema,
       ObColumnSchemaV2 hidden;
       for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
         hidden.reset();
+        // Hidden maintenance columns need a fresh unique column id.  reset() leaves
+        // OB_INVALID_ID, so the second hidden column would collide in the id hash
+        // array and surface as OB_SCHEMA_ERROR.  add_column() bumps
+        // max_used_column_id_ after each insert, so +1 always yields a free id.
+        hidden.set_column_id(table_schema.get_max_used_column_id() + 1);
         hidden.set_data_type(0 == i ? ObIntType : ObVarcharType);
         hidden.set_nullable(true);
         hidden.set_is_hidden(true);

@@ -526,7 +526,7 @@ protected:
                                    const ObTableSchema &table_schema);
   // create the three hidden backing columns of an AI column
   int add_ai_hidden_columns(ObTableSchema &table_schema,
-                            const share::schema::ObColumnSchemaV2 &ai_column);
+                            const common::ObString &ai_column_name);
   // walk the input expression to make sure it only references existing non-AI columns
   int validate_ai_input_expr_columns(const ParseNode *expr_node,
                                      const ObTableSchema &table_schema);
