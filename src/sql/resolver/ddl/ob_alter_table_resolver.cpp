@@ -846,18 +846,20 @@ int ObAlterTableResolver::resolve_ai_column_retry(const ParseNode &node)
       where_node = node.children_[1];
       ObString column_name(static_cast<int32_t>(column_node->str_len_), column_node->str_value_);
       const ObColumnSchemaV2 *column_schema = table_schema_->get_column_schema(column_name);
-      if (OB_ISNULL(column_schema) || !column_schema->is_ai_column()) {
+      // The in-memory is_ai_column flag is not part of the persisted column, so a
+      // schema reloaded from the inner tables looks like an ordinary column.  Trust
+      // the persisted AI metadata instead, which is what the worker uses too.
+      const ObAIColumnInfo *ai_info = OB_ISNULL(column_schema)
+          ? NULL
+          : table_schema_->get_ai_column_by_column_id(column_schema->get_column_id());
+      if (OB_ISNULL(column_schema) || OB_ISNULL(ai_info)) {
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
       } else {
-        const ObAIColumnInfo *ai_info = table_schema_->get_ai_column_by_column_id(column_schema->get_column_id());
         ObSqlString state_name;
         ObSqlString request_name;
         ObSqlString result_spec_name;
-        if (OB_ISNULL(ai_info)) {
-          ret = OB_ERR_UNEXPECTED;
-          SQL_RESV_LOG(WARN, "ai column info missing", K(ret), K(column_name));
-        } else if (OB_FAIL(share::schema::ObAIColumnSqlService::hidden_ai_column_names(
+        if (OB_FAIL(share::schema::ObAIColumnSqlService::hidden_ai_column_names(
                 column_name, state_name, request_name, result_spec_name))) {
           SQL_RESV_LOG(WARN, "fail to build hidden column names", K(ret));
         } else {
