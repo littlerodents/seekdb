@@ -3632,6 +3632,12 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
             for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
               hidden_schema.reset();
               hidden_schema.alter_type_ = OB_DDL_ADD_COLUMN;
+              // Mirror the column being added: the DDL service compares the alter
+              // column's table id against the new table schema.  The user column is
+              // stamped by resolve_alter_table_column_definition, so the backing
+              // columns have to be stamped here or the alter aborts with
+              // OB_ERR_UNEXPECTED before it ever assigns column ids.
+              hidden_schema.set_table_id(alter_column_schema.get_table_id());
               hidden_schema.set_data_type(0 == i ? ObIntType : ObVarcharType);
               hidden_schema.set_nullable(true);
               hidden_schema.set_is_hidden(true);
