@@ -146,10 +146,13 @@ int ObAIColumnSqlService::add_ai_columns(common::ObISQLClient &sql_client,
       }
     }
     if (OB_SUCC(ret) && row_count > 0) {
-      if (OB_FAIL(exec_dml_(sql_client, OB_ALL_AI_COLUMN_TNAME, dml, row_count))) {
-        LOG_WARN("fail to insert __all_ai_column", K(ret));
-      } else if (OB_FAIL(set_history_defaults_(dml, schema_version))) {
+      // is_deleted and schema_version carry no table default, so they have to be
+      // part of the row before the first insert; filling them afterwards leaves the
+      // insert short a value (1364).
+      if (OB_FAIL(set_history_defaults_(dml, schema_version))) {
         LOG_WARN("fail to set default columns", K(ret));
+      } else if (OB_FAIL(exec_dml_(sql_client, OB_ALL_AI_COLUMN_TNAME, dml, row_count))) {
+        LOG_WARN("fail to insert __all_ai_column", K(ret));
       } else if (OB_FAIL(exec_dml_(sql_client, OB_ALL_AI_COLUMN_HISTORY_TNAME, dml, row_count))) {
         LOG_WARN("fail to insert __all_ai_column_history", K(ret));
       }
@@ -174,9 +177,10 @@ int ObAIColumnSqlService::add_single_ai_column(common::ObISQLClient &sql_client,
       LOG_WARN("fail to resolve ai column info", K(ret));
     } else if (OB_FAIL(gen_ai_column_dml(table_schema, column, ai_info, dml))) {
       LOG_WARN("fail to gen ai column dml", K(ret));
+    } else if (OB_FAIL(set_history_defaults_(dml, schema_version))) {
+      LOG_WARN("fail to set default columns", K(ret));
     } else if (OB_FAIL(exec_dml_(sql_client, OB_ALL_AI_COLUMN_TNAME, dml, 1))) {
       LOG_WARN("fail to insert __all_ai_column", K(ret));
-    } else if (OB_FAIL(set_history_defaults_(dml, schema_version))) {
     } else if (OB_FAIL(exec_dml_(sql_client, OB_ALL_AI_COLUMN_HISTORY_TNAME, dml, 1))) {
       LOG_WARN("fail to insert __all_ai_column_history", K(ret));
     }
