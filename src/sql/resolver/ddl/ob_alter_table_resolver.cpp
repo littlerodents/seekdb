@@ -846,19 +846,22 @@ int ObAlterTableResolver::resolve_ai_column_retry(const ParseNode &node)
       where_node = node.children_[1];
       ObString column_name(static_cast<int32_t>(column_node->str_len_), column_node->str_value_);
       const ObColumnSchemaV2 *column_schema = table_schema_->get_column_schema(column_name);
-      // The in-memory is_ai_column flag is not part of the persisted column, so a
-      // schema reloaded from the inner tables looks like an ordinary column.  Trust
-      // the persisted AI metadata instead, which is what the worker uses too.
-      const ObAIColumnInfo *ai_info = OB_ISNULL(column_schema)
-          ? NULL
-          : table_schema_->get_ai_column_by_column_id(column_schema->get_column_id());
-      if (OB_ISNULL(column_schema) || OB_ISNULL(ai_info)) {
+      ObSqlString state_name;
+      ObSqlString request_name;
+      ObSqlString result_spec_name;
+      // Neither the in-memory is_ai_column flag nor a loaded ObAIColumnInfo can be
+      // relied on here: the flag is not persisted, and table schemas fetched one at a
+      // time do not carry the AI metadata.  The backing state column is part of the
+      // table, so its presence is the durable evidence that this is an AI column.
+      const bool is_ai_column = OB_NOT_NULL(column_schema)
+          && OB_SUCCESS == share::schema::ObAIColumnSqlService::hidden_ai_column_names(
+                                column_name, state_name, request_name, result_spec_name)
+          && OB_NOT_NULL(table_schema_->get_column_schema(
+                                ObString(state_name.length(), state_name.ptr())));
+      if (!is_ai_column) {
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
       } else {
-        ObSqlString state_name;
-        ObSqlString request_name;
-        ObSqlString result_spec_name;
         if (OB_FAIL(share::schema::ObAIColumnSqlService::hidden_ai_column_names(
                 column_name, state_name, request_name, result_spec_name))) {
           SQL_RESV_LOG(WARN, "fail to build hidden column names", K(ret));
