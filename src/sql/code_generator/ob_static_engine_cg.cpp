@@ -166,8 +166,15 @@ int ObStaticEngineCG::generate(const ObLogPlan &log_plan, ObPhysicalPlan &phy_pl
       for (int64_t t = 0; OB_SUCC(ret) && t < table_items.count(); ++t) {
         const TableItem *table_item = table_items.at(t);
         const share::schema::ObTableSchema *table_schema = NULL;
-        if (OB_ISNULL(table_item)) {
-          ret = OB_ERR_UNEXPECTED;
+        // Only real base/alias tables are looked up here.  Their schemas were just
+        // resolved through the same guard, so this read is a cache hit; looking up
+        // anything else (subqueries, joins and CTEs carry non-table ids in ref_id_)
+        // would miss the guard cache and issue nested SQL from inside plan
+        // generation, which recurses back into the code generator and wedges
+        // bootstrap once the inner statements do the same.
+        if (OB_ISNULL(table_item)
+            || OB_UNLIKELY(OB_INVALID_ID == table_item->ref_id_)
+            || !table_item->is_basic_table()) {
         } else if (OB_FAIL(schema_guard->get_table_schema(table_item->ref_id_, table_schema))) {
           LOG_WARN("fail to get table schema for ai strict refs", K(ret));
         } else if (OB_ISNULL(table_schema) || !table_schema->has_ai_column()) {
