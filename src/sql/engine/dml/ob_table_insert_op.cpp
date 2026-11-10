@@ -135,11 +135,13 @@ OB_INLINE int ObTableInsertOp::open_table_for_each()
   ai_rowkey_encs_.reset();
   if (OB_UNLIKELY(MY_SPEC.ins_ctdefs_.count() > 0 && !MY_SPEC.ins_ctdefs_.at(0).empty())) {
     const ObInsCtDef &primary_ctdef = *MY_SPEC.ins_ctdefs_.at(0).at(0);
-    ai_hook_table_id_ = primary_ctdef.das_ctdef_.table_id_;
+    ai_hook_table_id_ = primary_ctdef.das_ctdef_.index_tid_;
     if (OB_FAIL(ObAIColumnDMLService::on_write_op_open(ctx_, ai_hook_table_id_,
                                                        ai_pk_names_, ai_hook_active_))) {
       LOG_WARN("fail to activate ai column hook", K(ret));
     }
+  }
+  if (OB_FAIL(ret)) {
   }
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(ins_rtdefs_.allocate_array(ctx_.get_allocator(), MY_SPEC.ins_ctdefs_.count()))) {

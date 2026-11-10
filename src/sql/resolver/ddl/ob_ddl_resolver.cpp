@@ -6242,7 +6242,10 @@ int ObDDLResolver::add_ai_hidden_columns(ObTableSchema &table_schema,
         hidden.set_column_id(table_schema.get_max_used_column_id() + 1);
         hidden.set_data_type(0 == i ? ObIntType : ObVarcharType);
         hidden.set_nullable(true);
-        hidden.set_is_hidden(true);
+        // Invisible rather than hidden: the maintenance SQL the engine itself runs on the
+        // user's session has to address these columns by name (hidden columns are rejected
+        // outside inner sessions), while `select *` still must not expose them.
+        hidden.add_column_flag(INVISIBLE_COLUMN_FLAG);
         if (0 == i) {
           hidden.set_charset_type(CHARSET_BINARY);
           hidden.set_collation_type(CS_TYPE_BINARY);

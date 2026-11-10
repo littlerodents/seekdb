@@ -231,12 +231,10 @@ int ObAlterTableResolver::resolve(const ParseNode &parse_tree)
           *alter_table_stmt, nullptr == index_schema_ ? *table_schema_ : *index_schema_))) {
       }
     }
-    SQL_RESV_LOG(WARN, "AITRACE: after hints", K(ret), "retry", alter_table_stmt->is_ai_column_retry());
     if (OB_SUCC(ret)){
       if (OB_FAIL(deep_copy_string_in_part_expr(get_alter_table_stmt()))) {
       }
     }
-    SQL_RESV_LOG(WARN, "AITRACE: after deep copy part expr", K(ret));
 
     if (OB_SUCC(ret)) {
       const ObTableSchema *tbl_schema = nullptr;
@@ -245,7 +243,6 @@ int ObAlterTableResolver::resolve(const ParseNode &parse_tree)
         ret = OB_ERR_UNEXPECTED;
       }
     }
-    SQL_RESV_LOG(WARN, "AITRACE: after table schema check", K(ret));
   }
   DEBUG_SYNC(HANG_BEFORE_RESOLVER_FINISH);
   return ret;

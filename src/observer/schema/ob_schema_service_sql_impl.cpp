@@ -4166,6 +4166,17 @@ int ObSchemaServiceSQLImpl::get_not_core_table_schema(
       && OB_FAIL(fetch_trigger_list(schema_status, table_id, schema_version,
                                     sql_client, *table_schema))) {
   }
+  if (OB_SUCC(ret) && !is_schema_fetch_dependency) {
+    // A single-table fetch lands in the same schema manager as the batch fetch, so it has
+    // to carry the AI metadata too: the AI column worker, the DML hooks and RETRY AI COLUMN
+    // all resolve AI columns through the runtime schema and would see none of them.
+    ObArray<ObTableSchema *> ai_tables;
+    if (OB_FAIL(ai_tables.push_back(table_schema))) {
+    } else if (OB_FAIL(fetch_all_ai_column_info(schema_status, schema_version, sql_client,
+                                                ai_tables, &table_id, 1))) {
+      LOG_WARN("fail to fetch ai column info", K(ret), K(table_id));
+    }
+  }
   return ret;
 }
 

@@ -23,6 +23,7 @@
 #include "sql/engine/expr/ob_expr.h"
 #include "sql/session/ob_sql_session_info.h"
 #include "sql/session/ob_inner_sql_connection.h"
+#include "common/mysqlclient/ob_mysql_proxy.h"
 #include "sql/ob_sql_context.h"
 #include "share/schema/ob_schema_getter_guard.h"
 #include "share/schema/ob_table_schema.h"
@@ -62,12 +63,24 @@ int obj_to_sql_literal(const ObObj &obj, ObSqlString &dst)
   int ret = OB_SUCCESS;
   if (obj.is_null()) {
     ret = dst.append("NULL");
-  } else if (obj.is_integer_type() || obj.is_float() || obj.is_double()
-             || obj.is_numeric_type()) {
-    ObString num_str;
-    if (OB_FAIL(obj.get_varchar(num_str))) {
-      LOG_WARN("fail to get numeric text", K(ret), K(obj));
-    } else if (OB_FAIL(dst.append(num_str.ptr(), num_str.length()))) {
+  } else if (obj.is_integer_type()) {
+    // get_varchar only works for string-ish objects; numeric types need their own getter
+    // (a bigint rowkey value fails with OB_OBJ_TYPE_ERROR otherwise).
+    if (obj.is_unsigned_integer()) {
+      ret = dst.append_fmt("%lu", obj.get_uint64());
+    } else {
+      ret = dst.append_fmt("%ld", obj.get_int());
+    }
+  } else if (obj.is_float() || obj.is_double()) {
+    ret = dst.append_fmt("%.17g", obj.get_double());
+  } else if (obj.is_numeric_type()) {
+    number::ObNumber nmb;
+    char buf[number::ObNumber::MAX_PRINTABLE_SIZE];
+    int64_t pos = 0;
+    if (OB_FAIL(obj.get_number(nmb))) {
+      LOG_WARN("fail to get numeric value", K(ret), K(obj));
+    } else if (OB_FAIL(nmb.format(buf, sizeof(buf), pos, 0))) {
+    } else if (OB_FAIL(dst.append(buf, pos))) {
     }
   } else {
     ObString text;
@@ -114,32 +127,37 @@ int md5_hex(const ObString &seed, char *buf, const int64_t buf_len)
   return ret;
 }
 
-int get_table_schema(ObExecContext &ctx, const uint64_t table_id,
+// Look up a table schema for the AI maintenance SQL.  The guard carried by ObSqlCtx is not
+// usable here: a DDL statement tears its context down after resolve, and the per-statement
+// guard of a DML is not meant to be handed out.  Take a fresh server-side runtime guard
+// instead; it has to outlive the returned schema, so the caller owns it.
+int get_table_schema(ObExecContext &ctx,
+                     ObSchemaGetterGuard &guard,
+                     const uint64_t table_id,
                      const ObTableSchema *&table_schema)
 {
   int ret = OB_SUCCESS;
   table_schema = NULL;
-  const ObSqlCtx *sql_ctx = ctx.get_sql_ctx();
-  ObSchemaGetterGuard *guard = OB_NOT_NULL(sql_ctx) ? sql_ctx->schema_guard_ : NULL;
-  if (OB_ISNULL(guard)) {
-    // no schema guard available (e.g. inner statements); skip
-  } else if (OB_FAIL(guard->get_table_schema(table_id, table_schema))) {
+  ObSQLSessionInfo *session = ctx.get_my_session();
+  if (OB_ISNULL(session)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(GCTX.schema_service_)) {
+    ret = OB_NOT_INIT;
+  } else if (OB_FAIL(GCTX.schema_service_->get_runtime_schema_guard(guard))) {
+    LOG_WARN("fail to get runtime schema guard", K(ret), K(table_id));
+  } else if (OB_FAIL(guard.get_table_schema(table_id, table_schema))) {
     LOG_WARN("fail to get table schema", K(ret), K(table_id));
   }
   return ret;
 }
 
 
-int get_database_name(ObExecContext &ctx, const ObTableSchema &table_schema,
+int get_database_name(ObSchemaGetterGuard &guard, const ObTableSchema &table_schema,
                       common::ObString &db_name)
 {
   int ret = OB_SUCCESS;
-  const ObSqlCtx *sql_ctx = ctx.get_sql_ctx();
-  ObSchemaGetterGuard *guard = OB_NOT_NULL(sql_ctx) ? sql_ctx->schema_guard_ : NULL;
   const share::schema::ObDatabaseSchema *db_schema = NULL;
-  if (OB_ISNULL(guard)) {
-    ret = OB_SCHEMA_ERROR;
-  } else if (OB_FAIL(guard->get_database_schema(table_schema.get_database_id(), db_schema))) {
+  if (OB_FAIL(guard.get_database_schema(table_schema.get_database_id(), db_schema))) {
     LOG_WARN("fail to get database schema", K(ret), "db_id", table_schema.get_database_id());
   } else if (OB_ISNULL(db_schema)) {
     ret = OB_ERR_UNEXPECTED;
@@ -149,6 +167,45 @@ int get_database_name(ObExecContext &ctx, const ObTableSchema &table_schema,
   return ret;
 }
 
+// Running nested SQL on the session that is already executing a statement needs two
+// adjustments, both borrowed from the dbms_stats executor:
+//  * the statement counter must read "no statement in progress" (-1), otherwise the nested
+//    statement's own start/end bookkeeping fails with OB_ERR_UNEXPECTED;
+//  * autocommit must be off while the nested statement runs, otherwise its implicit
+//    end-transaction would commit or roll back the statement that is still in flight.
+// Everything is restored on scope exit, before the outer statement ends its transaction.
+class NestedStmtGuard
+{
+public:
+  explicit NestedStmtGuard(ObSQLSessionInfo *session)
+    : session_(session), nested_count_(-1), restore_autocommit_(false)
+  {
+    if (OB_NOT_NULL(session_)) {
+      nested_count_ = session_->get_nested_count();
+      session_->set_nested_count(-1);
+      bool autocommit = false;
+      if (OB_SUCCESS == session_->get_autocommit(autocommit) && autocommit) {
+        restore_autocommit_ = OB_SUCCESS == session_->set_autocommit(false);
+      }
+    }
+  }
+  ~NestedStmtGuard()
+  {
+    if (OB_NOT_NULL(session_)) {
+      session_->set_nested_count(nested_count_);
+      if (restore_autocommit_) {
+        session_->set_autocommit(true);
+      }
+    }
+  }
+private:
+  ObSQLSessionInfo *session_;
+  int64_t nested_count_;
+  bool restore_autocommit_;
+};
+
+// Maintenance SQL has to observe the statement's own uncommitted rows, so it runs on a
+// connection that shares the user's session (and therefore its transaction).
 int open_nested_conn(ObSQLSessionInfo *session,
                      sqlclient::ObISQLConnectionGuard &conn_guard,
                      sqlclient::ObISQLConnection *&conn)
@@ -158,7 +215,7 @@ int open_nested_conn(ObSQLSessionInfo *session,
   if (OB_ISNULL(session)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(query::ObInnerSQLConnectionAccess::
-                     create_connection_with_external_session(session, conn_guard))) {
+                     create_spi_connection_with_external_session(session, conn_guard))) {
     LOG_WARN("fail to create nested connection on user session", K(ret));
   } else if (OB_ISNULL(conn = conn_guard.get_ptr())) {
     ret = OB_ERR_UNEXPECTED;
@@ -182,6 +239,50 @@ int hidden_names(const ObString &column_name,
   return ret;
 }
 
+// Read the persisted AI column metadata straight from __all_ai_column.  A table schema
+// fetched by id for a nested statement may carry no AI metadata (the loader only fills it
+// for the tables listed in the multi-table fetch), so the inner table is the authority.
+int load_ai_column_meta(common::ObMySQLProxy &proxy,
+                        const uint64_t table_id,
+                        const common::ObString &column_name,
+                        int64_t &column_id,
+                        common::ObSqlString &normalized_expr)
+{
+  int ret = OB_SUCCESS;
+  column_id = OB_INVALID_ID;
+  normalized_expr.reset();
+  ObSqlString escaped_name;
+  ObSqlString sql;
+  if (OB_FAIL(escape_string(column_name, escaped_name))) {
+  } else if (OB_FAIL(sql.assign_fmt(
+                 "SELECT column_id, normalized_expr FROM oceanbase.__all_ai_column "
+                 "WHERE table_id = %lu AND column_name = '%.*s'",
+                 table_id, static_cast<int>(escaped_name.length()), escaped_name.ptr()))) {
+  } else {
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      common::sqlclient::ObMySQLResult *result = NULL;
+      if (OB_FAIL(proxy.read(res, sql.ptr()))) {
+        LOG_WARN("fail to read ai column meta", K(ret), K(sql));
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_ITER_END == (ret = result->next())) {
+        // the column is not recorded as an AI column
+        ret = OB_SUCCESS;
+      } else if (OB_FAIL(ret)) {
+      } else {
+        ObString expr;
+        if (OB_FAIL(result->get_int("column_id", column_id))) {
+          LOG_WARN("fail to read ai column id", K(ret));
+        } else if (OB_FAIL(result->get_varchar("normalized_expr", expr))) {
+          LOG_WARN("fail to read ai column expression", K(ret));
+        } else if (OB_FAIL(normalized_expr.assign(expr))) {
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 } // end namespace ob_ai
 
 int ObAIColumnDMLService::on_write_op_open(ObExecContext &ctx,
@@ -193,9 +294,9 @@ int ObAIColumnDMLService::on_write_op_open(ObExecContext &ctx,
   hook_active = false;
   pk_names.reset();
   const ObTableSchema *table_schema = NULL;
-  if (OB_FAIL(ob_ai::get_table_schema(ctx, table_id, table_schema))) {
+  ObSchemaGetterGuard guard;
+  if (OB_FAIL(ob_ai::get_table_schema(ctx, guard, table_id, table_schema))) {
   } else if (OB_ISNULL(table_schema) || !table_schema->has_ai_column()) {
-    // not an AI table: nothing to do
   } else {
     const ObRowkeyInfo &rowkey_info = table_schema->get_rowkey_info();
     for (int64_t i = 0; OB_SUCC(ret) && i < rowkey_info.get_size(); ++i) {
@@ -297,18 +398,19 @@ int ObAIColumnDMLService::finish_write(ObExecContext &ctx,
                                        const common::ObIArray<common::ObString> &rowkey_encs)
 {
   int ret = OB_SUCCESS;
+  ob_ai::NestedStmtGuard nested_guard(ctx.get_my_session());
   if (rowkey_preds.empty()) {
     // nothing touched
   } else {
     const ObTableSchema *table_schema = NULL;
-    if (OB_FAIL(ob_ai::get_table_schema(ctx, table_id, table_schema))) {
+    ObSchemaGetterGuard guard;
+    if (OB_FAIL(ob_ai::get_table_schema(ctx, guard, table_id, table_schema))) {
     } else if (OB_ISNULL(table_schema) || !table_schema->has_ai_column()) {
-      // not an AI table
     } else {
       ObString db_name;
       const ObString &tb_name = table_schema->get_table_name_str();
         if (OB_FAIL(ret)) {
-        } else if (OB_FAIL(ob_ai::get_database_name(ctx, *table_schema, db_name))) {
+        } else if (OB_FAIL(ob_ai::get_database_name(guard, *table_schema, db_name))) {
           LOG_WARN("fail to get database name", K(ret));
         }
       if (db_name.empty() || tb_name.empty()) {
@@ -318,14 +420,14 @@ int ObAIColumnDMLService::finish_write(ObExecContext &ctx,
         sqlclient::ObISQLConnection *conn = NULL;
         int64_t affected = 0;
         if (OB_FAIL(ob_ai::open_nested_conn(ctx.get_my_session(), conn_guard, conn))) {
-          LOG_WARN("fail to open nested conn for ai column maintenance", K(ret));
         } else if (is_delete_op) {
           // drop pending tasks of deleted rows
           for (int64_t r = 0; OB_SUCC(ret) && r < rowkey_encs.count(); ++r) {
             ObSqlString sql;
             if (OB_FAIL(sql.assign_fmt(
-                    "DELETE FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND rowkey_enc = '%s'",
-                    table_id, rowkey_encs.at(r).ptr()))) {
+                    "DELETE FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND rowkey_enc = '%.*s'",
+                    table_id, static_cast<int>(rowkey_encs.at(r).length()),
+                    rowkey_encs.at(r).ptr()))) {
             } else if (OB_FAIL(conn->execute_write(sql.ptr(), affected))) {
               LOG_WARN("fail to delete ai column tasks on row delete", K(ret), K(sql));
             }
@@ -352,19 +454,20 @@ int ObAIColumnDMLService::finish_write(ObExecContext &ctx,
                         "INSERT INTO oceanbase.__all_ai_column_task "
                         "(table_id, column_id, rowkey_enc, request_id, rowkey_predicate, "
                         "state, retry_count, eligible_ts, request) "
-                        "SELECT %lu, %lu, '%s', '%s', '%s', 0, 0, CURRENT_TIMESTAMP(6), (%s) "
-                        "FROM `%.*s`.`%.*s` WHERE %s "
+                        "SELECT %lu, %lu, '%.*s', '%s', '%.*s', 0, 0, CURRENT_TIMESTAMP(6), (%s) "
+                        "FROM `%.*s`.`%.*s` WHERE %.*s "
                         "AND NOT (`%s` <=> (%s)) "
                         "ON DUPLICATE KEY UPDATE state = 0, retry_count = 0, "
                         "eligible_ts = VALUES(eligible_ts), request = VALUES(request), "
                         "request_id = VALUES(request_id), rowkey_predicate = VALUES(rowkey_predicate)",
                         table_id, ai_info.column_id_,
-                        rowkey_encs.at(r).ptr(), request_id,
-                        rowkey_preds.at(r).ptr(),
+                        static_cast<int>(rowkey_encs.at(r).length()), rowkey_encs.at(r).ptr(),
+                        request_id,
+                        static_cast<int>(rowkey_preds.at(r).length()), rowkey_preds.at(r).ptr(),
                         ai_info.normalized_expr_.ptr(),
                         static_cast<int>(db_name.length()), db_name.ptr(),
                         static_cast<int>(tb_name.length()), tb_name.ptr(),
-                        rowkey_preds.at(r).ptr(),
+                        static_cast<int>(rowkey_preds.at(r).length()), rowkey_preds.at(r).ptr(),
                         request_col.ptr(),
                         ai_info.normalized_expr_.ptr()))) {
                   LOG_WARN("fail to build task upsert sql", K(ret));
@@ -389,26 +492,26 @@ int ObAIColumnDMLService::finish_write(ObExecContext &ctx,
                 if (is_insert_op) {
                   if (OB_FAIL(sql.assign_fmt(
                           "UPDATE `%.*s`.`%.*s` SET `%.*s` = NULL, `%s` = 0, `%s` = NULL, `%s` = (%s) "
-                          "WHERE %s AND NOT (`%s` <=> (%s))",
+                          "WHERE %.*s AND NOT (`%s` <=> (%s))",
                           static_cast<int>(db_name.length()), db_name.ptr(),
                           static_cast<int>(tb_name.length()), tb_name.ptr(),
                           static_cast<int>(ai_info.column_name_.length()), ai_info.column_name_.ptr(),
                           state_col.ptr(), result_spec_col.ptr(), request_col.ptr(),
                           ai_info.normalized_expr_.ptr(),
-                          rowkey_preds.at(r).ptr(),
+                          static_cast<int>(rowkey_preds.at(r).length()), rowkey_preds.at(r).ptr(),
                           result_spec_col.ptr(),
                           ai_info.normalized_expr_.ptr()))) {
                   }
                 } else {
                   if (OB_FAIL(sql.assign_fmt(
                           "UPDATE `%.*s`.`%.*s` SET `%.*s` = NULL, `%s` = 0, `%s` = NULL, `%s` = (%s) "
-                          "WHERE %s AND `%s` IS NOT NULL AND NOT (`%s` <=> (%s))",
+                          "WHERE %.*s AND `%s` IS NOT NULL AND NOT (`%s` <=> (%s))",
                           static_cast<int>(db_name.length()), db_name.ptr(),
                           static_cast<int>(tb_name.length()), tb_name.ptr(),
                           static_cast<int>(ai_info.column_name_.length()), ai_info.column_name_.ptr(),
                           state_col.ptr(), result_spec_col.ptr(), request_col.ptr(),
                           ai_info.normalized_expr_.ptr(),
-                          rowkey_preds.at(r).ptr(),
+                          static_cast<int>(rowkey_preds.at(r).length()), rowkey_preds.at(r).ptr(),
                           result_spec_col.ptr(),
                           result_spec_col.ptr(),
                           ai_info.normalized_expr_.ptr()))) {
@@ -435,45 +538,51 @@ int ObAIColumnDMLService::execute_ai_column_retry(ObExecContext &ctx,
                                                   const common::ObString &predicate)
 {
   int ret = OB_SUCCESS;
+  // RETRY AI COLUMN runs as a standalone statement, so its writes do not have to share the
+  // statement's transaction: run them on the server's internal proxy (like the AI worker),
+  // which keeps them when the DDL statement below ends.
+  common::ObMySQLProxy *proxy = ctx.get_sql_proxy();
   const ObTableSchema *table_schema = NULL;
-  if (OB_FAIL(ob_ai::get_table_schema(ctx, table_id, table_schema))) {
+  ObSchemaGetterGuard guard;
+  if (OB_ISNULL(proxy)) {
+    ret = OB_NOT_INIT;
+  } else if (OB_FAIL(ob_ai::get_table_schema(ctx, guard, table_id, table_schema))) {
   } else if (OB_ISNULL(table_schema)) {
     ret = OB_TABLE_NOT_EXIST;
   } else {
     ObString db_name;
     const ObString &tb_name = table_schema->get_table_name_str();
-    LOG_WARN("AITRACE: retry entry", K(table_id), K(column_name),
-             "ai_columns", table_schema->get_ai_columns().count(),
-             "columns", table_schema->get_column_count(), K(predicate));
         if (OB_FAIL(ret)) {
-        } else if (OB_FAIL(ob_ai::get_database_name(ctx, *table_schema, db_name))) {
+        } else if (OB_FAIL(ob_ai::get_database_name(guard, *table_schema, db_name))) {
           LOG_WARN("fail to get database name", K(ret));
         }
-    LOG_WARN("AITRACE: db name resolved", K(ret), K(db_name), K(tb_name));
     const ObAIColumnInfo *ai_info = NULL;
     for (int64_t i = 0; OB_ISNULL(ai_info) && i < table_schema->get_ai_columns().count(); ++i) {
       if (0 == column_name.case_compare(table_schema->get_ai_columns().at(i).column_name_)) {
         ai_info = &table_schema->get_ai_columns().at(i);
       }
     }
-    if (OB_ISNULL(ai_info)) {
-      ret = OB_NOT_SUPPORTED;
-      LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
-    } else if (db_name.empty() || tb_name.empty()) {
+    if (db_name.empty() || tb_name.empty()) {
       ret = OB_ERR_UNEXPECTED;
     } else {
-      LOG_WARN("AITRACE: ai info found", "column_id", ai_info->column_id_);
-      sqlclient::ObISQLConnectionGuard conn_guard;
-      sqlclient::ObISQLConnection *conn = NULL;
       int64_t affected = 0;
       const int64_t stmt_token = ObTimeUtility::current_time();
-      if (OB_FAIL(ob_ai::open_nested_conn(ctx.get_my_session(), conn_guard, conn))) {
-        LOG_WARN("AITRACE: open_nested_conn failed", K(ret));
-      } else if (OB_ISNULL(conn)) {
-        ret = OB_INNER_STAT_ERROR;
-        LOG_WARN("AITRACE: nested conn is null", K(ret));
+      int64_t ai_column_id = OB_INVALID_ID;
+      ObSqlString normalized_expr;
+      if (OB_NOT_NULL(ai_info)) {
+        ai_column_id = static_cast<int64_t>(ai_info->column_id_);
+        if (OB_FAIL(normalized_expr.assign(ai_info->normalized_expr_))) {
+        }
+      }
+      if (OB_FAIL(ret)) {
+      } else if (OB_INVALID_ID == ai_column_id
+                 && OB_FAIL(ob_ai::load_ai_column_meta(*proxy, table_id, column_name,
+                                                       ai_column_id, normalized_expr))) {
+        LOG_WARN("fail to load ai column meta", K(ret), K(table_id), K(column_name));
+      } else if (OB_INVALID_ID == ai_column_id) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
       } else {
-        LOG_WARN("AITRACE: nested conn ready");
         // build rowkey expression text for rowkey_enc / rowkey_predicate columns in SQL
         ObSqlString pred_expr;
         ObSqlString enc_expr;
@@ -517,20 +626,22 @@ int ObAIColumnDMLService::execute_ai_column_retry(ObExecContext &ctx,
                   "(table_id, column_id, rowkey_enc, request_id, rowkey_predicate, "
                   "state, retry_count, eligible_ts, request) "
                   "SELECT %lu, %lu, %s, MD5(CONCAT_WS(':', %s, '%ld')), %s, 0, 0, CURRENT_TIMESTAMP(6), (%s) "
-                  "FROM `%.*s`.`%.*s` WHERE %s "
+                  "FROM `%.*s`.`%.*s` WHERE %.*s "
                   "ON DUPLICATE KEY UPDATE state = 0, retry_count = 0, "
                   "eligible_ts = VALUES(eligible_ts), request = VALUES(request), "
                   "request_id = VALUES(request_id), rowkey_predicate = VALUES(rowkey_predicate)",
-                  table_id, ai_info->column_id_,
+                  table_id, static_cast<uint64_t>(ai_column_id),
                   enc_concat.ptr(),
                   enc_expr.ptr(), stmt_token,
                   pred_concat.ptr(),
-                  ai_info->normalized_expr_.ptr(),
+                  normalized_expr.ptr(),
                   static_cast<int>(db_name.length()), db_name.ptr(),
                   static_cast<int>(tb_name.length()), tb_name.ptr(),
+                  static_cast<int>(predicate.empty() ? 3 : predicate.length()),
                   predicate.empty() ? "1 = 1" : predicate.ptr()))) {
-          } else if (OB_FAIL(conn->execute_write(sql.ptr(), affected))) {
+          } else if (OB_FAIL(proxy->write(sql.ptr(), affected))) {
             LOG_WARN("fail to upsert ai column tasks for retry", K(ret), K(sql));
+          } else {
           }
         }
         if (OB_SUCC(ret)) {
@@ -543,15 +654,17 @@ int ObAIColumnDMLService::execute_ai_column_retry(ObExecContext &ctx,
             ObSqlString sql;
             if (OB_FAIL(sql.assign_fmt(
                     "UPDATE `%.*s`.`%.*s` SET `%.*s` = NULL, `%s` = 0, `%s` = NULL, `%s` = (%s) "
-                    "WHERE %s",
+                    "WHERE %.*s",
                     static_cast<int>(db_name.length()), db_name.ptr(),
                     static_cast<int>(tb_name.length()), tb_name.ptr(),
                     static_cast<int>(column_name.length()), column_name.ptr(),
                     state_col.ptr(), result_spec_col.ptr(), request_col.ptr(),
-                    ai_info->normalized_expr_.ptr(),
-                    predicate.empty() ? "1 = 1" : predicate.ptr()))) {
-            } else if (OB_FAIL(conn->execute_write(sql.ptr(), affected))) {
+                    normalized_expr.ptr(),
+                    static_cast<int>(predicate.empty() ? 3 : predicate.length()),
+                  predicate.empty() ? "1 = 1" : predicate.ptr()))) {
+            } else if (OB_FAIL(proxy->write(sql.ptr(), affected))) {
               LOG_WARN("fail to invalidate ai column for retry", K(ret), K(sql));
+            } else {
             }
           }
         }
@@ -567,13 +680,13 @@ int ObAIColumnDMLService::check_strict_read(ObExecContext &ctx,
 {
   int ret = OB_SUCCESS;
   ObSQLSessionInfo *session = ctx.get_my_session();
+  ob_ai::NestedStmtGuard nested_guard(session);
   if (table_ids.empty() || OB_ISNULL(session)) {
     // nothing referenced
   } else {
     sqlclient::ObISQLConnectionGuard conn_guard;
     sqlclient::ObISQLConnection *conn = NULL;
     if (OB_FAIL(ob_ai::open_nested_conn(session, conn_guard, conn))) {
-      LOG_WARN("fail to open nested conn for strict read check", K(ret));
     } else {
       // one probe per referenced column
       for (int64_t i = 0; OB_SUCC(ret) && i < table_ids.count(); ++i) {
@@ -581,14 +694,15 @@ int ObAIColumnDMLService::check_strict_read(ObExecContext &ctx,
         {
           common::sqlclient::ObMySQLResult *result = NULL;
           const ObTableSchema *table_schema = NULL;
-          if (OB_FAIL(ob_ai::get_table_schema(ctx, table_ids.at(i), table_schema))) {
+          ObSchemaGetterGuard guard;
+          if (OB_FAIL(ob_ai::get_table_schema(ctx, guard, table_ids.at(i), table_schema))) {
           } else if (OB_ISNULL(table_schema)) {
             // table vanished; let the main query report it
           } else {
             ObString db_name;
             const ObString &tb_name = table_schema->get_table_name_str();
         if (OB_FAIL(ret)) {
-        } else if (OB_FAIL(ob_ai::get_database_name(ctx, *table_schema, db_name))) {
+        } else if (OB_FAIL(ob_ai::get_database_name(guard, *table_schema, db_name))) {
           LOG_WARN("fail to get database name", K(ret));
         }
             ObSqlString state_col;
