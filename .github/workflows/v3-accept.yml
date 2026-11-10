@@ -1,0 +1,148 @@
+name: v3 acceptance
+
+on:
+  push:
+    branches:
+      - v3-accept
+
+permissions:
+  contents: read
+
+jobs:
+  scored-suites:
+    name: scored-suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Restore build caches
+        uses: actions/cache@v4
+        with:
+          path: /tmp/seekdb-ci-cache
+          key: seekdb-accept-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            seekdb-accept-${{ runner.os }}-
+
+      - name: Prepare task directory
+        env:
+          SEEKDB_TASK_DIR: ${{ runner.temp }}/seekdb-task
+        run: bash .github/script/seekdb/prepare.sh
+
+      - name: Compile seekdb
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          SEEKDB_TASK_DIR: ${{ runner.temp }}/seekdb-task
+          PACKAGE_TYPE: release
+          MAKE_ARGS: -j2
+          DEP_CACHE_DIR: /tmp/seekdb-ci-cache/deps
+          CCACHE_DIR: /tmp/seekdb-ci-cache/ccache
+        run: bash .github/script/seekdb/compile.sh
+
+      - name: Run the scored suites
+        working-directory: tools/deploy
+        env:
+          OBMYSQL_PORT: "2881"
+          OBMYSQL_MS0: 127.0.0.1
+          OBMYSQL_MS0_DEV: 127.0.0.1
+          OBMYSQL_PWD: admin
+          OBMYSQL_USR: admin
+          OBSERVER_DIR: ${{ runner.temp }}/seekdb-run
+          IS_BUSINESS: "0"
+          TENANT: mysql
+        run: |
+          set -uo pipefail
+          WS="$GITHUB_WORKSPACE"
+          BASE="$OBSERVER_DIR"
+          WORK="$RUNNER_TEMP/accept"
+          mkdir -p "$WORK/tmp" "$WORK/log" "$WORK/reject"
+          MT="$WS/deps/3rd/u01/obclient/bin/mysqltest"
+          OC="$WS/deps/3rd/u01/obclient/bin/obclient"
+          export PATH="$(dirname "$OC"):$PATH"
+          export LD_LIBRARY_PATH="$WS/deps/3rd/u01/obclient/lib:$WS/deps/3rd/u01/obclient/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          "$OC" --version 2>/dev/null || echo "obclient unusable, will fall back to mysql"
+
+          prepare() {
+            python3 "$WS/.github/script/seekdb/sdb.py" destroy --base-dir "$BASE" >/dev/null 2>&1 || true
+            python3 "$WS/.github/script/seekdb/sdb.py" start \
+              --binary "$WS/build_release/src/observer/seekdb" \
+              --base-dir "$BASE"
+            python3 "$WS/.github/script/seekdb/sdb.py" wait-ready \
+              --base-dir "$BASE" --client mysql
+            if "$OC" -h127.0.0.1 -P2881 -uroot -A -c -Doceanbase < init.sql; then
+              "$OC" -h127.0.0.1 -P2881 -uroot -A -c -Dtest < init_user.sql
+            else
+              echo "obclient init failed, retrying with system mysql"
+              mysql -h127.0.0.1 -P2881 -uroot -A -c -Doceanbase < init.sql
+              mysql -h127.0.0.1 -P2881 -uroot -A -c -Dtest < init_user.sql
+            fi
+            "$OC" -h127.0.0.1 -P2881 -uroot -N -e "alter system set syslog_level='WARN';" 2>/dev/null \
+              || mysql -h127.0.0.1 -P2881 -uroot -N -e "alter system set syslog_level='WARN';" || true
+            mkdir -p "$BASE/data_for_mysqltest_file_sql"
+            cp mysql_test/test_suite/file_sql/data/* "$BASE/data_for_mysqltest_file_sql/"
+            (
+              cd "$BASE/data_for_mysqltest_file_sql"
+              base64 -d simple.parquet.b64 > simple.parquet
+              rm -f simple.parquet.b64
+            )
+          }
+
+          run_case() {
+            local suite="$1" name="$2"
+            echo ""
+            echo "===== $suite.$name ====="
+            rm -f "$WORK/log/timer" 2>/dev/null || true
+            if timeout 600 "$MT" --host=127.0.0.1 --port=2881 --user=admin --password=admin \
+                 --database=test --tmpdir="$WORK/tmp" --logdir="$WORK/log" --silent \
+                 --test-file="mysql_test/test_suite/$suite/t/$name.test" \
+                 --result-file="mysql_test/test_suite/$suite/r/mysql/$name.result" \
+                 --timer-file="$WORK/log/timer" --tail-lines=20 > "$WORK/$name.out" 2>&1; then
+              echo "PASS $suite.$name"
+            else
+              rc=$?
+              echo "FAIL $suite.$name rc=$rc"
+              cp "$WORK/log/$name.reject" "$WORK/reject/$name.reject" 2>/dev/null || true
+              tail -n 25 "$WORK/$name.out" | sed 's/^/    /'
+              FAILED=1
+              prepare
+            fi
+          }
+
+          FAILED=0
+          prepare
+          python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py start 8000 || true
+
+          for case in \
+              ai_function:ai_model_ddl \
+              ai_function:ai_model_endpoint_ddl \
+              ai_function:ai_model_lower_case_name_mysql0 \
+              ai_function:ai_model_lower_case_name_mysql1 \
+              ai_function:ai_prompt \
+              ai_function:ai_function_enhancement \
+              file_sql:file_sql_basic \
+              ai_column:ai_column_ddl \
+              ai_column:ai_column_retry_strict \
+              ai_column:ai_column_t1_dml \
+              ai_column:ai_column_vector_index \
+              ai_column:ai_column_worker; do
+            suite="${case%%:*}"
+            name="${case##*:}"
+            run_case "$suite" "$name"
+          done
+
+          echo ""
+          echo "=== server-side warnings and errsim hits ==="
+          grep -aE "\[ERRSIM\]|hidden column|ai column|ai_column" "$BASE/log/seekdb.log" 2>/dev/null | tail -n 150 | tee "$WORK/server-warn.txt" || true
+          exit $FAILED
+
+      - name: Upload acceptance artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v3-acceptance
+          path: |
+            ${{ runner.temp }}/accept
+          if-no-files-found: warn
