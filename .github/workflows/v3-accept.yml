@@ -71,7 +71,10 @@ jobs:
               --binary "$WS/build_release/src/observer/seekdb" \
               --base-dir "$BASE"
             python3 "$WS/.github/script/seekdb/sdb.py" wait-ready \
-              --base-dir "$BASE" --client mysql
+              --base-dir "$BASE" --client mysql --timeout 600 \
+              || { echo "=== seekdb did not become ready; log tail ==="; \
+                   tail -n 80 "$BASE/log/seekdb.log" 2>/dev/null | cut -c1-220; \
+                   ls -la "$BASE/log" 2>/dev/null || true; exit 1; }
             if "$OC" -h127.0.0.1 -P2881 -uroot -A -c -Doceanbase < init.sql; then
               "$OC" -h127.0.0.1 -P2881 -uroot -A -c -Dtest < init_user.sql
             else
@@ -145,4 +148,5 @@ jobs:
           name: v3-acceptance
           path: |
             ${{ runner.temp }}/accept
+            ${{ runner.temp }}/seekdb-run/log
           if-no-files-found: warn
