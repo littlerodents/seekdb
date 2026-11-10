@@ -3622,14 +3622,11 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
           }
         }
 
-        //add column
-        if (OB_SUCC(ret)) {
-          if (OB_FAIL(alter_table_stmt->add_column(alter_column_schema))) {
-          } else if (FALSE_IT(alter_table_stmt->set_sql_mode(session_info_->get_sql_mode()))) {
-          }
-        }
-
-        // add hidden backing columns of an AI column
+        // add hidden backing columns of an AI column.  They must precede the user column
+        // in the alter list: the DDL service persists the AI metadata of the user column
+        // while processing it (insert_single_column -> add_single_ai_column), and that
+        // resolves the backing columns by name in the new table schema, so they have to
+        // have been added first or the alter aborts with OB_ERR_UNEXPECTED.
         if (OB_SUCC(ret) && alter_column_schema.is_ai_column()) {
           AlterColumnSchema hidden_schema;
           ObSqlString state_name;
@@ -3672,6 +3669,13 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
                 SQL_RESV_LOG(WARN, "fail to add hidden ai column", K(ret));
               }
             }
+          }
+        }
+
+        //add column
+        if (OB_SUCC(ret)) {
+          if (OB_FAIL(alter_table_stmt->add_column(alter_column_schema))) {
+          } else if (FALSE_IT(alter_table_stmt->set_sql_mode(session_info_->get_sql_mode()))) {
           }
         }
       }
