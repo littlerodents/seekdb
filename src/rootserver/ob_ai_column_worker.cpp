@@ -72,12 +72,14 @@ int escape_string(const ObString &src, ObSqlString &dst)
   return ret;
 }
 
+// Single quoted literals: model output is frequently JSON, and a double quoted literal
+// would end at the first quote inside the value (syntax error 5001 on write back).
 int write_quoted(const ObString &src, ObSqlString &dst)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(dst.append("\"", 1))) {
+  if (OB_FAIL(dst.append("'", 1))) {
   } else if (OB_FAIL(escape_string(src, dst))) {
-  } else if (OB_FAIL(dst.append("\"", 1))) {
+  } else if (OB_FAIL(dst.append("'", 1))) {
   }
   return ret;
 }
@@ -252,8 +254,11 @@ int ObAIColumnWorker::delete_task_rows(const common::ObIArray<TaskItem> &group)
     ObSqlString sql;
     if (OB_FAIL(sql.assign_fmt(
             "DELETE FROM oceanbase.__all_ai_column_task "
-            "WHERE table_id = %lu AND column_id = %lu AND rowkey_enc = '%s' AND request_id = '%s'",
-            item.table_id_, item.column_id_, item.rowkey_enc_.ptr(), item.request_id_.ptr()))) {
+            "WHERE table_id = %lu AND column_id = %lu "
+            "AND rowkey_enc = '%.*s' AND request_id = '%.*s'",
+            item.table_id_, item.column_id_,
+            static_cast<int>(item.rowkey_enc_.length()), item.rowkey_enc_.ptr(),
+            static_cast<int>(item.request_id_.length()), item.request_id_.ptr()))) {
     } else if (OB_FAIL(sql_proxy_->write(sql.ptr(), affected))) {
       LOG_WARN("fail to delete ai column task row", K(ret), K(sql));
     }
@@ -483,11 +488,12 @@ int ObAIColumnWorker::process_group(common::ObIAllocator &alloc,
                           "UPDATE oceanbase.__all_ai_column_task SET state = 3, "
                           "retry_count = retry_count + 1, "
                           "eligible_ts = DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL %ld SECOND) "
-                          "WHERE table_id = %lu AND column_id = %lu AND rowkey_enc = '%s' "
-                          "AND request_id = '%s'",
+                          "WHERE table_id = %lu AND column_id = %lu AND rowkey_enc = '%.*s' "
+                          "AND request_id = '%.*s'",
                           ob_ai_worker::RETRY_BACKOFF_SECONDS,
-                          item.table_id_, item.column_id_, item.rowkey_enc_.ptr(),
-                          item.request_id_.ptr()))) {
+                          item.table_id_, item.column_id_,
+                          static_cast<int>(item.rowkey_enc_.length()), item.rowkey_enc_.ptr(),
+                          static_cast<int>(item.request_id_.length()), item.request_id_.ptr()))) {
                   } else if (OB_FAIL(sql_proxy_->write(sql.ptr(), affected))) {
                     LOG_WARN("fail to schedule ai task retry", K(ret), K(sql));
                   }
@@ -509,10 +515,11 @@ int ObAIColumnWorker::process_group(common::ObIAllocator &alloc,
                     ObSqlString del_sql;
                     if (OB_FAIL(del_sql.assign_fmt(
                             "DELETE FROM oceanbase.__all_ai_column_task "
-                            "WHERE table_id = %lu AND column_id = %lu AND rowkey_enc = '%s' "
-                            "AND request_id = '%s'",
-                            item.table_id_, item.column_id_, item.rowkey_enc_.ptr(),
-                            item.request_id_.ptr()))) {
+                            "WHERE table_id = %lu AND column_id = %lu AND rowkey_enc = '%.*s' "
+                            "AND request_id = '%.*s'",
+                            item.table_id_, item.column_id_,
+                            static_cast<int>(item.rowkey_enc_.length()), item.rowkey_enc_.ptr(),
+                            static_cast<int>(item.request_id_.length()), item.request_id_.ptr()))) {
                     } else if (OB_FAIL(sql_proxy_->write(del_sql.ptr(), affected))) {
                       LOG_WARN("fail to delete failed ai task", K(ret), K(del_sql));
                     }

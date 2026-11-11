@@ -178,11 +178,19 @@ class NestedStmtGuard
 {
 public:
   explicit NestedStmtGuard(ObSQLSessionInfo *session)
-    : session_(session), nested_count_(-1), restore_autocommit_(false)
+    : session_(session), nested_count_(-1), restore_autocommit_(false), was_user_(false)
   {
     if (OB_NOT_NULL(session_)) {
       nested_count_ = session_->get_nested_count();
       session_->set_nested_count(-1);
+      // The maintenance SQL addresses the hidden __ai_* backing columns by name, which the
+      // resolver only allows inside an inner session.  The session is only marked inner for
+      // the duration of these nested statements and restored before the outer statement
+      // continues, so the user's own statement keeps its identity and privileges.
+      was_user_ = session_->is_user_session();
+      if (was_user_) {
+        session_->set_inner_session();
+      }
       bool autocommit = false;
       if (OB_SUCCESS == session_->get_autocommit(autocommit) && autocommit) {
         restore_autocommit_ = OB_SUCCESS == session_->set_autocommit(false);
@@ -196,12 +204,16 @@ public:
       if (restore_autocommit_) {
         session_->set_autocommit(true);
       }
+      if (was_user_) {
+        session_->set_user_session();
+      }
     }
   }
 private:
   ObSQLSessionInfo *session_;
   int64_t nested_count_;
   bool restore_autocommit_;
+  bool was_user_;
 };
 
 // Maintenance SQL has to observe the statement's own uncommitted rows, so it runs on a

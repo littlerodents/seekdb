@@ -5958,8 +5958,9 @@ int ObDDLResolver::validate_ai_input_expr_columns(const ParseNode *expr_node,
           ObString col_name(static_cast<int32_t>(name_node->str_len_), name_node->str_value_);
           const ObColumnSchemaV2 *col = table_schema.get_column_schema(col_name);
           if (OB_NOT_NULL(col) && col->is_ai_column()) {
+            // No LOG_USER_ERROR here: the expected client output is the generic
+            // "Not supported feature or function" rather than a custom detail.
             ret = OB_NOT_SUPPORTED;
-            LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI column depending on another AI column");
           } else if (OB_ISNULL(col)) {
             ret = OB_ERR_BAD_FIELD_ERROR;
             LOG_USER_ERROR(OB_ERR_BAD_FIELD_ERROR, col_name.length(), col_name.ptr(), "column list");
@@ -6242,10 +6243,11 @@ int ObDDLResolver::add_ai_hidden_columns(ObTableSchema &table_schema,
         hidden.set_column_id(table_schema.get_max_used_column_id() + 1);
         hidden.set_data_type(0 == i ? ObIntType : ObVarcharType);
         hidden.set_nullable(true);
-        // Invisible rather than hidden: the maintenance SQL the engine itself runs on the
-        // user's session has to address these columns by name (hidden columns are rejected
-        // outside inner sessions), while `select *` still must not expose them.
-        hidden.add_column_flag(INVISIBLE_COLUMN_FLAG);
+        // The catalog contract for a backing column is a hidden column (the tests read
+        // __all_column.is_hidden).  The maintenance SQL that has to address them by name
+        // runs with the session temporarily marked as an inner session, which is what
+        // grants hidden columns access in the resolver.
+        hidden.set_is_hidden(true);
         if (0 == i) {
           hidden.set_charset_type(CHARSET_BINARY);
           hidden.set_collation_type(CS_TYPE_BINARY);
