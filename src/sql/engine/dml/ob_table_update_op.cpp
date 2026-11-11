@@ -207,12 +207,29 @@ OB_INLINE int ObTableUpdateOp::open_table_for_each()
   ai_old_rowkey_preds_.reset();
   ai_old_rowkey_encs_.reset();
   ai_pk_changed_ = false;
+  ai_writes_pk_ = false;
+  ai_new_pk_idx_ = -1;
   if (OB_UNLIKELY(MY_SPEC.upd_ctdefs_.count() > 0 && !MY_SPEC.upd_ctdefs_.at(0).empty())) {
     const ObUpdCtDef &primary_ctdef = *MY_SPEC.upd_ctdefs_.at(0).at(0);
     ai_hook_table_id_ = primary_ctdef.dupd_ctdef_.index_tid_;
     if (OB_FAIL(ObAIColumnDMLService::on_write_op_open(ctx_, ai_hook_table_id_,
                                                        ai_pk_names_, ai_hook_active_))) {
       LOG_WARN("fail to activate ai column hook", K(ret));
+    } else if (ai_hook_active_) {
+      uint64_t written_rowkey_id = OB_INVALID_ID;
+      if (OB_FAIL(ObAIColumnDMLService::writes_rowkey(
+                    ctx_, ai_hook_table_id_,
+                    primary_ctdef.dupd_ctdef_.updated_column_ids_,
+                    ai_writes_pk_, written_rowkey_id))) {
+        LOG_WARN("fail to check whether the update moves the primary key", K(ret));
+      } else {
+        // new_row_ is parallel to the dml column list, so look the rowkey up there
+        for (int64_t k = 0; OB_SUCC(ret) && k < primary_ctdef.column_ids_.count(); ++k) {
+          if (primary_ctdef.column_ids_.at(k) == written_rowkey_id) {
+            ai_new_pk_idx_ = k;
+          }
+        }
+      }
     }
   }
   if (OB_FAIL(ret)) {
@@ -349,6 +366,29 @@ OB_INLINE int ObTableUpdateOp::update_row_to_das()
       } else if (OB_FAIL(calc_tablet_loc(upd_ctdef, upd_rtdef, old_tablet_loc, new_tablet_loc))) {
       } else if (OB_FAIL(ObDMLService::update_row(upd_ctdef, upd_rtdef, old_tablet_loc, new_tablet_loc, dml_rtctx_,
                                                  modify_row.old_row_, modify_row.new_row_, modify_row.full_row_))) {
+      } else if (ai_hook_active_ && 0 == j && ai_writes_pk_
+                 && 1 == ai_pk_names_.count() && ai_new_pk_idx_ >= 0) {
+        // the row moved to another primary key: full_row_ still carries the previous value.
+        // The value the statement writes is already materialised in the full row image, and
+        // re-evaluating the plan expressions here would corrupt the affected row accounting,
+        // so read it from the stored row directly.
+        const ObChunkDatumStore::StoredRow *written_row = modify_row.new_row_;
+        ObObj pk_obj;
+        if (OB_ISNULL(written_row) || ai_new_pk_idx_ >= written_row->cnt_) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (ai_new_pk_idx_ >= upd_ctdef.new_row_.count()) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(written_row->cells()[ai_new_pk_idx_].to_obj(
+                     pk_obj, upd_ctdef.new_row_.at(ai_new_pk_idx_)->obj_meta_))) {
+          LOG_WARN("fail to convert the new primary key value", K(ret));
+        } else if (OB_FAIL(ObAIColumnDMLService::build_single_rowkey(
+                     ctx_.get_allocator(), ai_pk_names_.at(0), pk_obj,
+                     ai_rowkey_preds_, ai_rowkey_encs_))) {
+          LOG_WARN("fail to build the new rowkey for ai column maintenance", K(ret));
+        } else {
+          // this branch replaces the generic tail of the chain, so keep its accounting
+          ++upd_rtdef.found_rows_;
+        }
       } else if (ai_hook_active_ && 0 == j
                  && OB_FAIL(ObAIColumnDMLService::collect_written_rowkey(
                      ctx_.get_allocator(), eval_ctx_, ai_pk_names_,
@@ -447,13 +487,16 @@ int ObTableUpdateOp::write_rows_post_proc(int last_errno)
       }
     }
   }
+  if (ai_writes_pk_) {
+    // the row moved to another primary key: its carried over result is stale
+    ai_pk_changed_ = true;
+  }
+  bool ai_maintenance_pending = false;
   if (OB_SUCC(ret) && iter_end_ && ai_hook_active_ && !ai_rowkey_preds_.empty()) {
     if (OB_FAIL(submit_all_dml_task())) {
       LOG_WARN("fail to flush dml tasks before ai maintenance", K(ret));
-    } else if (OB_FAIL(ObAIColumnDMLService::finish_write(ctx_, ai_hook_table_id_,
-            false /*not delete*/, false /*update*/, ai_rowkey_preds_, ai_rowkey_encs_,
-            ai_pk_changed_))) {
-      LOG_WARN("fail to run ai column maintenance on update", K(ret));
+    } else {
+      ai_maintenance_pending = true;
     }
   }
   if (iter_end_) {
@@ -481,6 +524,16 @@ int ObTableUpdateOp::write_rows_post_proc(int last_errno)
     if (OB_SUCC(ret) && (config::_enable_defensive_check() > 0)) {
       if (OB_FAIL(check_update_affected_row())) {
       }
+    }
+  }
+  // The AI maintenance writes to the same row (it nulls the result and refreshes the
+  // request), which would make the affected-row accounting above disagree with the DAS
+  // counters of this statement, so it runs only once that check has passed.
+  if (OB_SUCC(ret) && ai_maintenance_pending) {
+    if (OB_FAIL(ObAIColumnDMLService::finish_write(ctx_, ai_hook_table_id_,
+            false /*not delete*/, false /*update*/, ai_rowkey_preds_, ai_rowkey_encs_,
+            ai_pk_changed_))) {
+      LOG_WARN("fail to run ai column maintenance on update", K(ret));
     }
   }
 

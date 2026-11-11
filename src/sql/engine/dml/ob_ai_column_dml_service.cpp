@@ -308,6 +308,36 @@ int load_ai_column_meta(common::ObMySQLProxy &proxy,
 
 } // end namespace ob_ai
 
+int ObAIColumnDMLService::writes_rowkey(ObExecContext &ctx, const uint64_t table_id,
+                                        const common::ObIArray<uint64_t> &written_column_ids,
+                                        bool &writes_pk, uint64_t &written_rowkey_id)
+{
+  int ret = OB_SUCCESS;
+  writes_pk = false;
+  written_rowkey_id = OB_INVALID_ID;
+  const ObTableSchema *table_schema = NULL;
+  ObSchemaGetterGuard guard;
+  if (OB_FAIL(ob_ai::get_table_schema(ctx, guard, table_id, table_schema))) {
+  } else if (OB_ISNULL(table_schema)) {
+    ret = OB_TABLE_NOT_EXIST;
+  } else {
+    const ObRowkeyInfo &rowkey_info = table_schema->get_rowkey_info();
+    for (int64_t i = 0; OB_SUCC(ret) && !writes_pk && i < rowkey_info.get_size(); ++i) {
+      uint64_t rowkey_column_id = OB_INVALID_ID;
+      if (OB_FAIL(rowkey_info.get_column_id(i, rowkey_column_id))) {
+      } else {
+        for (int64_t j = 0; !writes_pk && j < written_column_ids.count(); ++j) {
+          if (written_column_ids.at(j) == rowkey_column_id) {
+            writes_pk = true;
+            written_rowkey_id = rowkey_column_id;
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 int ObAIColumnDMLService::on_write_op_open(ObExecContext &ctx,
                                            const uint64_t table_id,
                                            common::ObIArray<common::ObString> &pk_names,
@@ -341,6 +371,46 @@ int ObAIColumnDMLService::on_write_op_open(ObExecContext &ctx,
     }
     if (OB_SUCC(ret)) {
       hook_active = true;
+    }
+  }
+  return ret;
+}
+
+int ObAIColumnDMLService::build_single_rowkey(common::ObIAllocator &alloc,
+                                              const common::ObString &pk_name,
+                                              const common::ObObj &obj,
+                                              common::ObIArray<common::ObString> &rowkey_preds,
+                                              common::ObIArray<common::ObString> &rowkey_encs)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString literal;
+  ObSqlString text;
+  ObSqlString pred;
+  ObSqlString enc;
+  if (OB_FAIL(ob_ai::obj_to_sql_literal(obj, literal))) {
+  } else if (obj.is_null()) {
+    (void)text.append("NULL");
+  } else if (obj.is_integer_type() || obj.is_float() || obj.is_double()
+             || obj.is_numeric_type()) {
+    (void)text.append(literal.string().ptr(), literal.string().length());
+  } else {
+    ObString sv;
+    if (OB_SUCC(obj.get_string(sv))) {
+      text.append(sv);
+    }
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(pred.append_fmt("`%.*s` = ", static_cast<int>(pk_name.length()),
+                                     pk_name.ptr()))) {
+  } else if (OB_FAIL(pred.append(literal.string().ptr(), literal.string().length()))) {
+  } else if (OB_FAIL(ob_ai::hex_encode(text.string(), enc))) {
+  } else {
+    common::ObString pred_saved;
+    common::ObString enc_saved;
+    if (OB_FAIL(ob_write_string(alloc, pred.string(), pred_saved))) {
+    } else if (OB_FAIL(ob_write_string(alloc, enc.string(), enc_saved))) {
+    } else if (OB_FAIL(rowkey_preds.push_back(pred_saved))) {
+    } else if (OB_FAIL(rowkey_encs.push_back(enc_saved))) {
     }
   }
   return ret;
@@ -432,7 +502,7 @@ int ObAIColumnDMLService::finish_write(ObExecContext &ctx,
   } else {
     const ObTableSchema *table_schema = NULL;
     ObSchemaGetterGuard guard;
-    if (OB_FAIL(ob_ai::get_table_schema(ctx, guard, table_id, table_schema))) {
+  if (OB_FAIL(ob_ai::get_table_schema(ctx, guard, table_id, table_schema))) {
     } else if (OB_ISNULL(table_schema) || !table_schema->has_ai_column()) {
     } else {
       ObString db_name;
@@ -502,6 +572,7 @@ int ObAIColumnDMLService::finish_write(ObExecContext &ctx,
                   LOG_WARN("fail to build task upsert sql", K(ret));
                 } else if (OB_FAIL(conn->execute_write(sql.ptr(), affected))) {
                   LOG_WARN("fail to upsert ai column task", K(ret), K(sql));
+                } else {
                 }
               }
             }
@@ -562,6 +633,7 @@ int ObAIColumnDMLService::finish_write(ObExecContext &ctx,
                 if (OB_SUCC(ret)) {
                   if (OB_FAIL(conn->execute_write(sql.ptr(), affected))) {
                     LOG_WARN("fail to invalidate ai column", K(ret), K(sql));
+                  } else {
                   }
                 }
               }

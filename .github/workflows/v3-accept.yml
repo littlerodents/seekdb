@@ -53,6 +53,10 @@ jobs:
           OBSERVER_DIR: ${{ runner.temp }}/seekdb-run
           IS_BUSINESS: "0"
           TENANT: mysql
+          # the file_sql fixtures are staged by exec'ing these commands from the suite's
+          # include files (the upstream harness points them at ssh/scp)
+          FILE_SQL_COPY_CMD: mkdir -p "$OBSERVER_DIR/data_for_mysqltest_file_sql" && cp -f mysql_test/test_suite/file_sql/data/* "$OBSERVER_DIR/data_for_mysqltest_file_sql/" && cd "$OBSERVER_DIR/data_for_mysqltest_file_sql" && base64 -d simple.parquet.b64 > simple.parquet && rm -f simple.parquet.b64
+          FILE_SQL_CLEANUP_CMD: rm -rf "$OBSERVER_DIR/data_for_mysqltest_file_sql"
         run: |
           set -uo pipefail
           WS="$GITHUB_WORKSPACE"
@@ -84,13 +88,6 @@ jobs:
             fi
             "$OC" -h127.0.0.1 -P2881 -uroot -N -e "alter system set syslog_level='WARN';" 2>/dev/null \
               || mysql -h127.0.0.1 -P2881 -uroot -N -e "alter system set syslog_level='WARN';" || true
-            mkdir -p "$BASE/data_for_mysqltest_file_sql"
-            cp mysql_test/test_suite/file_sql/data/* "$BASE/data_for_mysqltest_file_sql/"
-            (
-              cd "$BASE/data_for_mysqltest_file_sql"
-              base64 -d simple.parquet.b64 > simple.parquet
-              rm -f simple.parquet.b64
-            )
           }
 
           run_case() {

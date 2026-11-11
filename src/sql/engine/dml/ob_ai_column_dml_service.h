@@ -73,6 +73,25 @@ public:
                                     const int64_t rowkey_cnt,
                                     common::ObIArray<common::ObString> &rowkey_preds,
                                     common::ObIArray<common::ObString> &rowkey_encs);
+  // Build the (predicate, encoding) pair for a single column rowkey from an already
+  // materialised value.  Used when an update moves the row to another primary key: the
+  // value the statement writes is available as a datum, but re-evaluating the plan's
+  // expressions at this point corrupts the affected row accounting of the statement.
+  static int build_single_rowkey(common::ObIAllocator &alloc,
+                                 const common::ObString &pk_name,
+                                 const common::ObObj &obj,
+                                 common::ObIArray<common::ObString> &rowkey_preds,
+                                 common::ObIArray<common::ObString> &rowkey_encs);
+
+  // True when the update writes at least one primary key column, i.e. the row moves to a
+  // different identity, so any result it carries over has to be invalidated even though the
+  // dependency expression is unchanged.
+  static int writes_rowkey(ObExecContext &ctx,
+                           const uint64_t table_id,
+                           const common::ObIArray<uint64_t> &written_column_ids,
+                           bool &writes_pk,
+                           uint64_t &written_rowkey_id);
+
   // Called at statement end: create/refresh tasks and invalidate results (insert/update)
   // or drop tasks (delete). All nested SQL joins the user transaction.
   static int finish_write(ObExecContext &ctx,

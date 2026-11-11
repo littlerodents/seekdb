@@ -122,6 +122,8 @@ protected:
   common::ObSEArray<common::ObString, 8> ai_old_rowkey_preds_;
   common::ObSEArray<common::ObString, 8> ai_old_rowkey_encs_;
   bool ai_pk_changed_;
+  bool ai_writes_pk_;
+  int64_t ai_new_pk_idx_;
 };
 
 } // end namespace sql
