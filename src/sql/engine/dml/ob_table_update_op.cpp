@@ -204,6 +204,9 @@ OB_INLINE int ObTableUpdateOp::open_table_for_each()
   ai_pk_names_.reset();
   ai_rowkey_preds_.reset();
   ai_rowkey_encs_.reset();
+  ai_old_rowkey_preds_.reset();
+  ai_old_rowkey_encs_.reset();
+  ai_pk_changed_ = false;
   if (OB_UNLIKELY(MY_SPEC.upd_ctdefs_.count() > 0 && !MY_SPEC.upd_ctdefs_.at(0).empty())) {
     const ObUpdCtDef &primary_ctdef = *MY_SPEC.upd_ctdefs_.at(0).at(0);
     ai_hook_table_id_ = primary_ctdef.dupd_ctdef_.index_tid_;
@@ -352,6 +355,12 @@ OB_INLINE int ObTableUpdateOp::update_row_to_das()
                      upd_ctdef.full_row_, upd_ctdef.dupd_ctdef_.rowkey_cnt_,
                      ai_rowkey_preds_, ai_rowkey_encs_))) {
         LOG_WARN("fail to collect rowkey for ai column maintenance", K(ret));
+      } else if (ai_hook_active_ && 0 == j
+                 && OB_FAIL(ObAIColumnDMLService::collect_written_rowkey(
+                     ctx_.get_allocator(), eval_ctx_, ai_pk_names_,
+                     upd_ctdef.old_row_, upd_ctdef.dupd_ctdef_.rowkey_cnt_,
+                     ai_old_rowkey_preds_, ai_old_rowkey_encs_))) {
+        LOG_WARN("fail to collect the previous rowkey for ai column maintenance", K(ret));
       } else if (need_after_row_process(upd_ctdef) && OB_FAIL(dml_modify_rows_.push_back(modify_row))) {
       } else {
         ++upd_rtdef.found_rows_;
@@ -431,11 +440,19 @@ int ObTableUpdateOp::check_update_affected_row()
 int ObTableUpdateOp::write_rows_post_proc(int last_errno)
 {
   int ret = last_errno;
+  if (OB_SUCC(ret) && ai_hook_active_ && ai_rowkey_preds_.count() == ai_old_rowkey_preds_.count()) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < ai_rowkey_encs_.count(); ++i) {
+      if (0 != ai_rowkey_encs_.at(i).compare(ai_old_rowkey_encs_.at(i))) {
+        ai_pk_changed_ = true;
+      }
+    }
+  }
   if (OB_SUCC(ret) && iter_end_ && ai_hook_active_ && !ai_rowkey_preds_.empty()) {
     if (OB_FAIL(submit_all_dml_task())) {
       LOG_WARN("fail to flush dml tasks before ai maintenance", K(ret));
     } else if (OB_FAIL(ObAIColumnDMLService::finish_write(ctx_, ai_hook_table_id_,
-            false /*not delete*/, false /*update*/, ai_rowkey_preds_, ai_rowkey_encs_))) {
+            false /*not delete*/, false /*update*/, ai_rowkey_preds_, ai_rowkey_encs_,
+            ai_pk_changed_))) {
       LOG_WARN("fail to run ai column maintenance on update", K(ret));
     }
   }

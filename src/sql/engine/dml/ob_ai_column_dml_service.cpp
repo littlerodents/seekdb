@@ -167,6 +167,12 @@ int get_database_name(ObSchemaGetterGuard &guard, const ObTableSchema &table_sch
   return ret;
 }
 
+// Set while the AI maintenance SQL itself runs.  Those statements write to the user's table
+// and would otherwise re-enter the DML hook: the invalidation UPDATE of an insert enqueues a
+// second task for the same row under a fresh request id, so one row ends up with two tasks
+// the worker treats as independent writes.
+static thread_local bool g_ai_maintenance_active = false;
+
 // Running nested SQL on the session that is already executing a statement needs two
 // adjustments, both borrowed from the dbms_stats executor:
 //  * the statement counter must read "no statement in progress" (-1), otherwise the nested
@@ -178,7 +184,8 @@ class NestedStmtGuard
 {
 public:
   explicit NestedStmtGuard(ObSQLSessionInfo *session)
-    : session_(session), nested_count_(-1), restore_autocommit_(false), was_user_(false)
+    : session_(session), nested_count_(-1), restore_autocommit_(false), was_user_(false),
+      was_maintenance_active_(false)
   {
     if (OB_NOT_NULL(session_)) {
       nested_count_ = session_->get_nested_count();
@@ -191,6 +198,8 @@ public:
       if (was_user_) {
         session_->set_inner_session();
       }
+      was_maintenance_active_ = g_ai_maintenance_active;
+      g_ai_maintenance_active = true;
       bool autocommit = false;
       if (OB_SUCCESS == session_->get_autocommit(autocommit) && autocommit) {
         restore_autocommit_ = OB_SUCCESS == session_->set_autocommit(false);
@@ -207,6 +216,7 @@ public:
       if (was_user_) {
         session_->set_user_session();
       }
+      g_ai_maintenance_active = was_maintenance_active_;
     }
   }
 private:
@@ -214,6 +224,7 @@ private:
   int64_t nested_count_;
   bool restore_autocommit_;
   bool was_user_;
+  bool was_maintenance_active_;
 };
 
 // Maintenance SQL has to observe the statement's own uncommitted rows, so it runs on a
@@ -304,6 +315,10 @@ int ObAIColumnDMLService::on_write_op_open(ObExecContext &ctx,
 {
   int ret = OB_SUCCESS;
   hook_active = false;
+  if (ob_ai::g_ai_maintenance_active) {
+    // the write is the AI maintenance SQL itself, not user DML
+    return ret;
+  }
   pk_names.reset();
   const ObTableSchema *table_schema = NULL;
   ObSchemaGetterGuard guard;
@@ -407,7 +422,8 @@ int ObAIColumnDMLService::finish_write(ObExecContext &ctx,
                                        const bool is_delete_op,
                                        const bool is_insert_op,
                                        const common::ObIArray<common::ObString> &rowkey_preds,
-                                       const common::ObIArray<common::ObString> &rowkey_encs)
+                                       const common::ObIArray<common::ObString> &rowkey_encs,
+                                       const bool force_invalidate)
 {
   int ret = OB_SUCCESS;
   ob_ai::NestedStmtGuard nested_guard(ctx.get_my_session());
@@ -468,7 +484,7 @@ int ObAIColumnDMLService::finish_write(ObExecContext &ctx,
                         "state, retry_count, eligible_ts, request) "
                         "SELECT %lu, %lu, '%.*s', '%s', '%.*s', 0, 0, CURRENT_TIMESTAMP(6), (%s) "
                         "FROM `%.*s`.`%.*s` WHERE %.*s "
-                        "AND NOT (`%s` <=> (%s)) "
+                        "AND (%d = 1 OR NOT (`%s` <=> (%s))) "
                         "ON DUPLICATE KEY UPDATE state = 0, retry_count = 0, "
                         "eligible_ts = VALUES(eligible_ts), request = VALUES(request), "
                         "request_id = VALUES(request_id), rowkey_predicate = VALUES(rowkey_predicate)",
@@ -480,6 +496,7 @@ int ObAIColumnDMLService::finish_write(ObExecContext &ctx,
                         static_cast<int>(db_name.length()), db_name.ptr(),
                         static_cast<int>(tb_name.length()), tb_name.ptr(),
                         static_cast<int>(rowkey_preds.at(r).length()), rowkey_preds.at(r).ptr(),
+                        force_invalidate ? 1 : 0,
                         request_col.ptr(),
                         ai_info.normalized_expr_.ptr()))) {
                   LOG_WARN("fail to build task upsert sql", K(ret));
@@ -513,6 +530,19 @@ int ObAIColumnDMLService::finish_write(ObExecContext &ctx,
                           static_cast<int>(rowkey_preds.at(r).length()), rowkey_preds.at(r).ptr(),
                           result_spec_col.ptr(),
                           ai_info.normalized_expr_.ptr()))) {
+                  }
+                } else if (force_invalidate) {
+                  // the row moved to another primary key, so the result carried over from
+                  // the old identity is stale even if the expression is unchanged
+                  if (OB_FAIL(sql.assign_fmt(
+                          "UPDATE `%.*s`.`%.*s` SET `%.*s` = NULL, `%s` = 0, `%s` = NULL, `%s` = (%s) "
+                          "WHERE %.*s",
+                          static_cast<int>(db_name.length()), db_name.ptr(),
+                          static_cast<int>(tb_name.length()), tb_name.ptr(),
+                          static_cast<int>(ai_info.column_name_.length()), ai_info.column_name_.ptr(),
+                          state_col.ptr(), result_spec_col.ptr(), request_col.ptr(),
+                          ai_info.normalized_expr_.ptr(),
+                          static_cast<int>(rowkey_preds.at(r).length()), rowkey_preds.at(r).ptr()))) {
                   }
                 } else {
                   if (OB_FAIL(sql.assign_fmt(
@@ -649,7 +679,7 @@ int ObAIColumnDMLService::execute_ai_column_retry(ObExecContext &ctx,
                   normalized_expr.ptr(),
                   static_cast<int>(db_name.length()), db_name.ptr(),
                   static_cast<int>(tb_name.length()), tb_name.ptr(),
-                  static_cast<int>(predicate.empty() ? 3 : predicate.length()),
+                  static_cast<int>(predicate.empty() ? 5 : predicate.length()),
                   predicate.empty() ? "1 = 1" : predicate.ptr()))) {
           } else if (OB_FAIL(proxy->write(sql.ptr(), affected))) {
             LOG_WARN("fail to upsert ai column tasks for retry", K(ret), K(sql));
@@ -672,7 +702,7 @@ int ObAIColumnDMLService::execute_ai_column_retry(ObExecContext &ctx,
                     static_cast<int>(column_name.length()), column_name.ptr(),
                     state_col.ptr(), result_spec_col.ptr(), request_col.ptr(),
                     normalized_expr.ptr(),
-                    static_cast<int>(predicate.empty() ? 3 : predicate.length()),
+                    static_cast<int>(predicate.empty() ? 5 : predicate.length()),
                   predicate.empty() ? "1 = 1" : predicate.ptr()))) {
             } else if (OB_FAIL(proxy->write(sql.ptr(), affected))) {
               LOG_WARN("fail to invalidate ai column for retry", K(ret), K(sql));

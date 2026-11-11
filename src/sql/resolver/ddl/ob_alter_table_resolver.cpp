@@ -157,7 +157,14 @@ int ObAlterTableResolver::resolve(const ParseNode &parse_tree)
         // executor rewrites the AI state with nested SQL on the user's session.  The
         // remaining alter-table tail (table options, DDL hints, partition expressions,
         // schema re-checks) assumes a schema-changing statement and aborts it.
-        SQL_RESV_LOG(INFO, "ai column retry resolved, skipping alter table tail");
+        if (alter_table_stmt->get_alter_table_action_count() > 1) {
+          // while the retry action was being parsed only its own entry was counted, so the
+          // combination has to be rejected once the whole action list is known
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
+        } else {
+          SQL_RESV_LOG(INFO, "ai column retry resolved, skipping alter table tail");
+        }
         return ret;
       } else if (OB_FAIL(set_table_options())) {
       } else if (OB_FAIL(check_semistruct_encoding_type(*table_schema_, alter_table_stmt->get_alter_table_schema()))) {

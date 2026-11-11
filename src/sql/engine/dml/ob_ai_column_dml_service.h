@@ -80,7 +80,8 @@ public:
                           const bool is_delete_op,
                           const bool is_insert_op,
                           const common::ObIArray<common::ObString> &rowkey_preds,
-                          const common::ObIArray<common::ObString> &rowkey_encs);
+                          const common::ObIArray<common::ObString> &rowkey_encs,
+                          const bool force_invalidate = false);
 
   // ---------- RETRY AI COLUMN ----------
   static int execute_ai_column_retry(ObExecContext &ctx,

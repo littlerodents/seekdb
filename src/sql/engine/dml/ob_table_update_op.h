@@ -118,6 +118,10 @@ protected:
   common::ObSEArray<common::ObString, 8> ai_pk_names_;
   common::ObSEArray<common::ObString, 8> ai_rowkey_preds_;
   common::ObSEArray<common::ObString, 8> ai_rowkey_encs_;
+  // rowkeys of the rows before the update, used to notice a primary key change
+  common::ObSEArray<common::ObString, 8> ai_old_rowkey_preds_;
+  common::ObSEArray<common::ObString, 8> ai_old_rowkey_encs_;
+  bool ai_pk_changed_;
 };
 
 } // end namespace sql
