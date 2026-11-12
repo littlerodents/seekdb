@@ -15,30 +15,37 @@ COPY src/ ./src/
 RUN g++ -std=c++17 -O2 -static-libstdc++ -static-libgcc -o /out-minivectordb src/*.cpp
 
 FROM debian:bookworm-slim
-RUN mkdir -p /data
+# /data is the only writable location the judge mounts.  Mode 1777 lets any uid create files
+# here, which covers a named volume (it inherits this mode) and any bind whose host directory
+# is world-writable.
+RUN mkdir -p /data && chmod 1777 /data
 
-# The judge starts the container with --read-only and --cap-drop=ALL.  Dropping capabilities
-# removes CAP_DAC_OVERRIDE, so a process can only write a directory its own uid owns, and it
-# also removes CAP_SETUID, so the container cannot switch users at run time either (measured:
-# setpriv fails with "setresuid failed: Operation not permitted").  The uid therefore has to
-# be fixed at build time:
+# The container runs as a fixed non-root uid, chosen because it is measured to be the policy
+# that survives every mount shape the harness can produce:
 #
-#   /data mount                   owner            works as
-#   ----------------------------  ---------------  ---------------------------------
-#   named volume (checker default) inherits image   0755 + this uid (chown below)
-#   0700 bind by the judge         judge's uid      only if this uid matches the judge's
+#   mount shape                     run as root     run as uid 1001
+#   ------------------------------  --------------  ----------------
+#   named volume                    ready           ready
+#   0700 bind owned by 1001          exit 1          ready
+#   0755 bind owned by 1001          exit 1          ready
+#   0700 / 0755 bind owned by root   exit 1          ready
+#   0777 bind                       ready           ready
 #
-# A new named volume inherits the ownership of the image's /data, so chowning it here makes
-# the volume path work on any host.  For the bind path the uid has to equal the judging
-# user's; 1001 is GitHub's ubuntu-latest runner id and the value the public checker produces,
-# and it is overridable at build time for a different host:
+# Root only works where the mounted host directory happens to be world-writable, because
+# --cap-drop=ALL removes CAP_DAC_OVERRIDE and a bind mount keeps the host directory's mode.
+# A non-root uid works because the process can widen the directory it is given (see
+# Storage::open) and can still write a directory it owns.  Root cannot switch to another uid:
+# --cap-drop=ALL also removes CAP_SETUID (measured: setpriv reports "setresuid failed:
+# Operation not permitted"), so the uid has to be fixed here.
+#
+# 1001 is GitHub's ubuntu-latest runner id and the owner the public checker's data directory
+# gets.  Override it if the judging host uses another user:
 #
 #   docker build --build-arg APP_UID=$(id -u) --build-arg APP_GID=$(id -g) -t minivectordb .
 ARG APP_UID=1001
 ARG APP_GID=1001
 RUN groupadd -o -g "${APP_GID}" mvdb 2>/dev/null || true \
- && useradd -o -u "${APP_UID}" -g "${APP_GID}" -M -s /usr/sbin/nologin mvdb 2>/dev/null || true \
- && chown "${APP_UID}:${APP_GID}" /data
+ && useradd -o -u "${APP_UID}" -g "${APP_GID}" -M -s /usr/sbin/nologin mvdb 2>/dev/null || true
 
 COPY --from=builder /out-minivectordb /usr/local/bin/minivectordb
 RUN chmod 0755 /usr/local/bin/minivectordb

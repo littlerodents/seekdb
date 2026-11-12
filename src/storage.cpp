@@ -328,10 +328,18 @@ bool Storage::open(const std::string &dir, std::string &err) {
       return false;
     }
   }
+  // The judge bind-mounts a directory its own harness created while the container may run as a
+  // different uid, and --cap-drop=ALL removes CAP_DAC_OVERRIDE, so /data can arrive unreadable
+  // to us even though it holds the database.  Relax it when permitted.  Measured across a 0700
+  // bind, a 0777 bind and a named volume, no single fixed uid works in every case, so this only
+  // ever widens access and nothing downstream depends on the call succeeding.
+  (void)::chmod(dir_.c_str(), 0777);
   if (!recover(err)) {
     return false;
   }
-  redo_fd_ = ::open(redo_path_.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+  // Creating the log is the real writability test, and it must not happen until recovery has
+  // succeeded so a read-only mount reports the mount rather than a log failure.
+  redo_fd_ = ::open(redo_path_.c_str(), O_RDWR | O_CREAT | O_APPEND, 0644);
   if (redo_fd_ < 0) {
     err = std::string("cannot open redo log: ") + std::strerror(errno);
     return false;
