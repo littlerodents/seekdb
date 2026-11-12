@@ -1,0 +1,90 @@
+name: submission self-check
+
+# Builds the image from the submitted tree exactly as the platform will (the repository root
+# Dockerfile against the repository root sources) and runs the package's own protocol checker
+# against it. This is the pre-flight gate before spending a formal submission attempt.
+on:
+  push:
+    branches: [2026-competition-round2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: build submitted tree and run public cases
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the submitted image
+        run: docker build -t minivectordb:submit .
+
+      - name: Handshake
+        run: |
+          python3 protocol_check/run.py --image minivectordb:submit \
+            --handshake-only --output /tmp/results/handshake
+
+      - name: All public cases
+        run: |
+          python3 protocol_check/run.py --image minivectordb:submit \
+            --output /tmp/results/public
+
+      - name: Agent material is readable and within budget
+        run: |
+          python3 - <<'PY'
+          import json
+          p = "agent/conversation.json"
+          raw = open(p, encoding="utf-8").read()
+          size = len(raw.encode())
+          doc = json.loads(raw)
+          assert isinstance(doc, dict), "top level must be an object"
+          assert size <= 128 * 1024, f"{size} bytes exceeds 128 KiB"
+          print(f"agent/conversation.json: {size} bytes, {len(doc)} top-level keys, valid JSON object")
+          for entry in doc["student_contribution_index"]["entries"]:
+              ptr, quote = entry["json_pointer"], entry["quote"]
+              cur = doc
+              for tok in ptr.strip("/").split("/"):
+                  cur = cur[int(tok)] if isinstance(cur, list) else cur[tok]
+              assert cur == quote, f"{entry['id']}: pointer does not resolve to the quote"
+          print("all student_contribution_index pointers resolve to their quotes")
+          PY
+
+      - name: Crash durability
+        run: |
+          set +e
+          work="$(mktemp -d)"; chmod 700 "$work"
+          start() {
+            docker rm -f mvd >/dev/null 2>&1
+            mkfifo "$work/f.$$.$1" 2>/dev/null
+            docker run -i --name mvd --network=none --cpus=2 --memory=2g --memory-swap=2g \
+              --pids-limit=128 --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+              --mount "type=bind,src=$work,dst=/data" minivectordb:submit <"$work/f.$$.$1" \
+              >"$work/out.$1" 2>"$work/err.$1" &
+            exec 9<>"$work/f.$$.$1"
+          }
+          start 1
+          sleep 4
+          grep -q '"type":"ready"' "$work/out.1" || { echo "FAIL no ready"; cat "$work/err.1"; exit 1; }
+          printf '{"id":1,"op":"execute","sql":"CREATE TABLE t (id BIGINT PRIMARY KEY, v VARCHAR(8));"}\n' >&9
+          printf '{"id":2,"op":"execute","sql":"INSERT INTO t VALUES (1,'"'"'a'"'"'),(2,'"'"'b'"'"');"}\n' >&9
+          sleep 3
+          docker kill mvd >/dev/null; exec 9>&-
+          echo "--- before kill:"; cat "$work/out.1"
+          start 2
+          sleep 4
+          printf '{"id":1,"op":"execute","sql":"SELECT id,v FROM t ORDER BY id;"}\n' >&9
+          sleep 3
+          echo "--- after restart:"; tail -2 "$work/out.2"
+          grep -q '\[\[1,"a"\],\[2,"b"\]\]' "$work/out.2" && echo "durability OK" || { echo "FAIL durability"; cat "$work/err.2"; exit 1; }
+          docker kill mvd >/dev/null; exec 9>&-
+          docker rm -f mvd >/dev/null 2>&1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: submission-check
+          path: /tmp/results
+          if-no-files-found: warn
