@@ -35,10 +35,196 @@
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/expr/ob_expr_json_func_helper.h" // file not self-contained, there're logs inside.
 
+#include "lib/allocator/ob_malloc.h"
+#include "lib/hash_func/murmur_hash.h"
+
 namespace oceanbase
 {
 namespace sql
 {
+namespace
+{
+// ---- memo for tokenize() results ------------------------------------------
+// tokenize() is a pure function of (text, parser, parser properties, collation).
+// Workloads keep tokenizing the same documents (constant probes, index
+// maintenance over unchanged rows), so a bounded memo turns the repeated work
+// into one hash lookup: a hit skips parameter parsing, dictionary loading,
+// segmentation and JSON packing.  Correctness relies on the key covering every
+// input the slow path reads; nothing else influences the result.
+struct TokenizeMemo
+{
+  static constexpr int64_t SLOT_COUNT = 1024;             // power of two
+  static constexpr int64_t SLOT_MASK = SLOT_COUNT - 1;
+  static constexpr int64_t MAX_VALUE_BYTES = 256 * 1024;  // huge documents stay uncached
+
+  struct Slot
+  {
+    uint64_t hash1_;
+    uint64_t hash2_;
+    int64_t key_len_;
+    char *key_;
+    int64_t value_len_;
+    char *value_;
+    Slot() : hash1_(0), hash2_(0), key_len_(0), key_(nullptr), value_len_(0), value_(nullptr) {}
+    ~Slot()
+    {
+      if (nullptr != key_) { ::ob_free(key_); }
+      if (nullptr != value_) { ::ob_free(value_); }
+    }
+  };
+
+  Slot slots_[SLOT_COUNT];
+  pthread_mutex_t lock_;
+
+  TokenizeMemo() { pthread_mutex_init(&lock_, nullptr); }
+  ~TokenizeMemo() { pthread_mutex_destroy(&lock_); }
+
+  static TokenizeMemo &instance()
+  {
+    static TokenizeMemo memo;
+    return memo;
+  }
+
+  // Copies the cached bytes out under the lock and packs them after releasing it: the
+  // pack writes into the expression frame and may pull in LOB handling, which must not
+  // run while the memo lock is held across concurrent statements.
+  bool try_hit(const common::ObString &key, const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res)
+  {
+    bool hit = false;
+    const uint64_t h1 = common::murmurhash(key.ptr(), static_cast<int32_t>(key.length()), 0x20261111);
+    const uint64_t h2 = common::murmurhash(key.ptr(), static_cast<int32_t>(key.length()), 0x9781a2b3);
+    char stack_buf[2048];
+    char *out = stack_buf;
+    int64_t out_len = 0;
+    pthread_mutex_lock(&lock_);
+    Slot &slot = slots_[h1 & SLOT_MASK];
+    if (h1 == slot.hash1_ && h2 == slot.hash2_
+        && key.length() == slot.key_len_
+        && 0 == MEMCMP(key.ptr(), slot.key_, key.length())
+        && slot.value_len_ > 0) {
+      if (slot.value_len_ <= static_cast<int64_t>(sizeof(stack_buf))) {
+        MEMCPY(stack_buf, slot.value_, slot.value_len_);
+        out_len = slot.value_len_;
+        hit = true;
+      } else {
+        char *heap = static_cast<char *>(ob_malloc(slot.value_len_, common::ObMemAttr("TokMemoOut")));
+        if (nullptr != heap) {
+          MEMCPY(heap, slot.value_, slot.value_len_);
+          out = heap;
+          out_len = slot.value_len_;
+          hit = true;
+        }
+      }
+    }
+    pthread_mutex_unlock(&lock_);
+    if (hit) {
+      const common::ObString value(out_len, out);
+      if (OB_SUCCESS != ObJsonExprHelper::pack_json_str_res(expr, ctx, res, value)) {
+        hit = false;
+      }
+      if (out != stack_buf) {
+        ob_free(out);
+      }
+    }
+    return hit;
+  }
+
+  void insert(const common::ObString &key, const common::ObString &value)
+  {
+    if (value.length() <= 0 || value.length() > MAX_VALUE_BYTES) {
+      return;
+    }
+    const uint64_t h1 = common::murmurhash(key.ptr(), static_cast<int32_t>(key.length()), 0x20261111);
+    const uint64_t h2 = common::murmurhash(key.ptr(), static_cast<int32_t>(key.length()), 0x9781a2b3);
+    char *key_buf = static_cast<char *>(ob_malloc(key.length(), common::ObMemAttr("TokMemo")));
+    char *val_buf = static_cast<char *>(ob_malloc(value.length(), common::ObMemAttr("TokMemo")));
+    if (nullptr == key_buf || nullptr == val_buf) {
+      if (nullptr != key_buf) { ob_free(key_buf); }
+      if (nullptr != val_buf) { ob_free(val_buf); }
+      return;
+    }
+    MEMCPY(key_buf, key.ptr(), key.length());
+    MEMCPY(val_buf, value.ptr(), value.length());
+    pthread_mutex_lock(&lock_);
+    Slot &slot = slots_[h1 & SLOT_MASK];
+    if (nullptr != slot.key_) { ob_free(slot.key_); }
+    if (nullptr != slot.value_) { ob_free(slot.value_); }
+    slot.hash1_ = h1;
+    slot.hash2_ = h2;
+    slot.key_len_ = key.length();
+    slot.key_ = key_buf;
+    slot.value_len_ = value.length();
+    slot.value_ = val_buf;
+    pthread_mutex_unlock(&lock_);
+  }
+};
+
+// Serializes every input the tokenize path depends on into a fixed layout binary
+// key: raw field writes only, no formatting, so the hit path stays a few memcpys.
+// Argument evaluation errors are not reported here: the slow path re-evaluates the
+// same arguments and surfaces the error exactly as before.
+bool build_tokenize_memo_key(const ObExpr &expr, ObEvalCtx &ctx, common::ObSqlString &key)
+{
+  bool usable = false;
+  int ret = OB_SUCCESS;
+  ObDatum *text = nullptr;
+  ObDatum *parser = nullptr;
+  ObDatum *props = nullptr;
+  uint8_t flags = 0;
+  do {
+    if (OB_FAIL(expr.args_[0]->eval(ctx, text))) {
+      break;
+    } else if (nullptr != text && text->is_null()) {
+      flags |= 0x1;
+    }
+    if (expr.arg_cnt_ >= 2) {
+      flags |= 0x2;
+      if (OB_FAIL(expr.args_[1]->eval(ctx, parser))) {
+        break;
+      } else if (nullptr != parser && parser->is_null()) {
+        flags |= 0x4;
+      }
+    }
+    if (expr.arg_cnt_ >= 3) {
+      flags |= 0x8;
+      if (OB_FAIL(expr.args_[2]->eval(ctx, props))) {
+        break;
+      } else if (nullptr != props && props->is_null()) {
+        flags |= 0x10;
+      }
+    }
+    const uint32_t collation = static_cast<uint32_t>(expr.args_[0]->obj_meta_.get_collation_type());
+    const common::ObString empty;
+    const common::ObString &text_str = (flags & 0x1) ? empty : text->get_string();
+    const common::ObString &parser_str = (expr.arg_cnt_ < 2 || (flags & 0x4)) ? empty
+                                                                             : parser->get_string();
+    const common::ObString &props_str = (expr.arg_cnt_ < 3 || (flags & 0x10)) ? empty
+                                                                             : props->get_string();
+    const int32_t lens[3] = {static_cast<int32_t>(text_str.length()),
+                             static_cast<int32_t>(parser_str.length()),
+                             static_cast<int32_t>(props_str.length())};
+    const common::ObString *parts[3] = {&text_str, &parser_str, &props_str};
+    if (OB_FAIL(key.reserve(16 + lens[0] + lens[1] + lens[2]))) {
+      break;
+    } else if (OB_FAIL(key.append(reinterpret_cast<const char *>(&collation), sizeof(collation)))
+               || OB_FAIL(key.append(reinterpret_cast<const char *>(&flags), sizeof(flags)))) {
+      break;
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
+      if (OB_FAIL(key.append(reinterpret_cast<const char *>(&lens[i]), sizeof(lens[i])))
+          || OB_FAIL(key.append(*parts[i]))) {
+        break;
+      }
+    }
+    if (OB_SUCC(ret)) {
+      usable = true;
+    }
+  } while (false);
+  return usable;
+}
+
+} // namespace
+
 ObExprTokenize::ObExprTokenize(common::ObIAllocator &alloc)
     : ObStringExprOperator(alloc,
                            T_FUN_TOKENIZE,
@@ -54,6 +240,13 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
 {
   int ret = OB_SUCCESS;
 
+  common::ObSqlString memo_key;
+  const bool memo_usable = (expr.arg_cnt_ >= 1 && expr.arg_cnt_ <= 3)
+      && build_tokenize_memo_key(expr, ctx, memo_key);
+  if (memo_usable && TokenizeMemo::instance().try_hit(memo_key.string(), expr, ctx, expr_datum)) {
+    return ret;
+  }
+
   ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
   common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
 
@@ -65,11 +258,17 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(parse_param(expr, ctx, temp_allocator, param))) {
   } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
-  } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
-                                                     ctx,
-                                                     temp_allocator,
-                                                     json_result,
-                                                     expr_datum))) {
+  } else if (OB_ISNULL(json_result)) {
+    expr_datum.set_null();
+  } else {
+    common::ObString bin;
+    if (OB_FAIL(json_result->get_raw_binary(bin, &temp_allocator))) {
+      LOG_WARN("fail to serialize tokenize result", K(ret));
+    } else if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, expr_datum, bin))) {
+      LOG_WARN("fail to pack tokenize result", K(ret));
+    } else if (memo_usable) {
+      TokenizeMemo::instance().insert(memo_key.string(), bin);
+    }
   }
 
   return ret;

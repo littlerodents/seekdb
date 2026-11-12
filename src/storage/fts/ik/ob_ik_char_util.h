@@ -112,6 +112,7 @@ public:
 private:
   template <ObCharsetType CS_TYPE>
   static int do_classify(const char *input, const uint8_t char_len, CharType &type);
+  static void do_classify_unicode(const ob_wc_t unicode, CharType &type);
 
 private:
   /*************************  Alpha: english letter abc *********************/
@@ -501,29 +502,37 @@ template <ObCharsetType CS_TYPE>
 inline int ObFTCharUtil::do_classify(const char *input, const uint8_t char_len, CharType &type)
 {
   int ret = OB_SUCCESS;
-  bool checker = false;
+  // Decode the code point once.  Every predicate below used to decode the same character
+  // again, so a three byte CJK character paid four UTF-8 decodes per call.
+  ob_wc_t unicode = 0;
   type = CharType::USELESS;
 
-  if (OB_FAIL(is_alpha<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
-    type = CharType::ENGLISH_LETTER;
-  } else if (OB_FAIL(is_arabic<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
-    type = CharType::ARABIC_LETTER;
-  } else if (OB_FAIL(is_chinese<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
-    type = CharType::CHINESE;
-  } else if (OB_FAIL(is_other_cjk<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
-    type = CharType::OTHER_CJK;
-  } else if (OB_FAIL(is_surrogate_high<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
-    type = CharType::SURROGATE_HIGH;
-  } else if (OB_FAIL(is_surrogate_low<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
-    type = CharType::SURROGATE_LOW;
+  if (OB_FAIL(decode_unicode<CS_TYPE>(input, char_len, unicode))) {
+  } else {
+    do_classify_unicode(unicode, type);
   }
   return ret;
+}
+
+// Range checks in the same order as the per-predicate helpers, on an already decoded
+// code point.
+inline void ObFTCharUtil::do_classify_unicode(const ob_wc_t unicode, CharType &type)
+{
+  if (ObUnicodeBlockUtils::is_alpha(unicode)) {
+    type = CharType::ENGLISH_LETTER;
+  } else if (ObUnicodeBlockUtils::is_arabic(unicode)) {
+    type = CharType::ARABIC_LETTER;
+  } else if (ObUnicodeBlockUtils::is_chinese(unicode)) {
+    type = CharType::CHINESE;
+  } else if (ObUnicodeBlockUtils::is_other_cjk(unicode)) {
+    type = CharType::OTHER_CJK;
+  } else if (ObUnicodeBlockUtils::check_high_surrogate(unicode)) {
+    type = CharType::SURROGATE_HIGH;
+  } else if (ObUnicodeBlockUtils::check_low_surrogate(unicode)) {
+    type = CharType::SURROGATE_LOW;
+  } else {
+    type = CharType::USELESS;
+  }
 }
 
 inline int ObFTCharUtil::classify_first_char(ObCollationType coll_type,
@@ -532,12 +541,18 @@ inline int ObFTCharUtil::classify_first_char(ObCollationType coll_type,
                                              CharType &type)
 {
   int ret = OB_SUCCESS;
-  ObCharsetType cs_type = ObCharset::charset_type_by_coll(coll_type);
 
-  if (char_len == 1 && cs_type == CHARSET_UTF8MB4) {
-    classify_ascii(*input, type);
+  // A one byte character can only come from the utf8mb4 family (utf16 never yields one),
+  // so the charset lookup is skipped on the most frequent path in the hot loop.  Bytes
+  // outside ASCII are left unclassified, exactly like the previous behaviour.
+  if (char_len == 1) {
+    if (!classify_ascii(*input, type)) {
+      type = CharType::USELESS;
+    }
     return OB_SUCCESS;
   }
+
+  ObCharsetType cs_type = ObCharset::charset_type_by_coll(coll_type);
 
   switch (cs_type) {
   case CHARSET_UTF8MB4: {
