@@ -146,9 +146,11 @@ bool parse_literal(Parser &p, Value &out) {
     return true;
   }
   if (t.type == TokType::IDENT && to_upper(t.text) == "NULL") {
-    out.is_null = true;
-    ++p.pos;
-    return true;
+    // NULL is outside the supported subset, and the task requires unsupported input to be
+    // rejected rather than silently given some other meaning -- accepting it would put a value
+    // into a column that no comparison or vector operation is defined for.
+    p.err = "NULL is not supported";
+    return false;
   }
   p.err = "expected literal";
   return false;
