@@ -146,9 +146,14 @@ struct WhereClause {
 };
 
 struct OrderItem {
-  std::string column;   // empty when the term is an L2_DISTANCE alias
+  std::string column;   // empty when the term is an L2_DISTANCE expression
   std::string alias;    // set when ordering by a projected alias
   bool desc = false;
+  // ORDER BY L2_DISTANCE(col, '[...]'): the distance is computed for sorting only, with no
+  // matching projection required.  This is the form the task's vector search section uses.
+  bool is_l2 = false;
+  std::string l2_column;
+  std::vector<float> l2_query;
 };
 
 struct SelectItem {

@@ -575,16 +575,30 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
     }
     matched.push_back(&kv);
   }
-  // ORDER BY resolves to either a projected column/alias or an L2_DISTANCE alias.
+  // ORDER BY resolves to either a projected column/alias or an L2_DISTANCE term.  The term
+  // may be written inline (ORDER BY L2_DISTANCE(col,'[...]')) or refer to a projected
+  // L2_DISTANCE alias; both are kept as keys that already carry their own query vector.
   struct SortKey {
     bool by_l2 = false;
     size_t item_pos = 0;
     bool desc = false;
+    const std::vector<float> *l2_query = nullptr;  // set when the term is inline
+    int64_t l2_col_pos = -1;
   };
   std::vector<SortKey> keys;
   for (const auto &o : stmt.order_by) {
     SortKey key;
     key.desc = o.desc;
+    if (o.is_l2) {
+      key.by_l2 = true;
+      key.l2_query = &o.l2_query;
+      key.l2_col_pos = t->schema.column_pos(o.l2_column);
+      if (key.l2_col_pos < 0) {
+        return make_error("no_such_column", "order by L2_DISTANCE column does not exist");
+      }
+      keys.push_back(key);
+      continue;
+    }
     bool found = false;
     for (size_t k = 0; k < items.size(); ++k) {
       const std::string &alias = items[k].alias;
@@ -620,8 +634,11 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
     const size_t pos = key.item_pos - items.size();
     return pos < row.size() ? &row[pos] : nullptr;
   };
-  auto dist_sq_of = [&](const Row &row, size_t item_pos) {
-    const SelectItem &it = items[item_pos];
+  auto dist_sq_of = [&](const Row &row, const SortKey &key) {
+    if (key.l2_query != nullptr) {
+      return l2_distance_sq(row[static_cast<size_t>(key.l2_col_pos)].v, *key.l2_query);
+    }
+    const SelectItem &it = items[key.item_pos];
     const int64_t pos = t->schema.column_pos(it.l2_column);
     return l2_distance_sq(row[static_cast<size_t>(pos)].v, it.l2_query);
   };
@@ -632,8 +649,8 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
                          const std::pair<const int64_t, Row> *b) {
                        for (const auto &key : keys) {
                          if (key.by_l2) {
-                           const double da = dist_sq_of(a->second, key.item_pos);
-                           const double db = dist_sq_of(b->second, key.item_pos);
+                           const double da = dist_sq_of(a->second, key);
+                           const double db = dist_sq_of(b->second, key);
                            const double eps = 1e-12;
                            if (da < db - eps) {
                              return !key.desc;
@@ -672,8 +689,8 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
                          const std::pair<const int64_t, Row> *b) {
       for (const auto &key : keys) {
         if (key.by_l2) {
-          const double da = dist_sq_of(a->second, key.item_pos);
-          const double db = dist_sq_of(b->second, key.item_pos);
+          const double da = dist_sq_of(a->second, key);
+          const double db = dist_sq_of(b->second, key);
           const double eps = 1e-12;
           if (da < db - eps) {
             return !key.desc;

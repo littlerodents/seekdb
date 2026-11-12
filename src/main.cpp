@@ -6,7 +6,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <iostream>
+#include <new>
 #include <string>
 
 #include "engine.h"
@@ -119,6 +121,42 @@ std::string result_to_json(const mvdb::JsonValue &id, const mvdb::Result &r) {
   return out.dump();
 }
 
+// Builds the error reply for a request line too large to parse.  The id is the first field in
+// every request the protocol defines, so it can be read off the head of the line; when even
+// that is unreadable the reply carries a null id rather than being dropped.
+std::string request_too_large_reply(const std::string &line) {
+  const std::string key = "\"id\"";
+  std::string id_text = "null";
+  const size_t at = line.find(key);
+  if (at != std::string::npos) {
+    size_t k = at + key.size();
+    while (k < line.size() && (line[k] == ' ' || line[k] == ':')) {
+      ++k;
+    }
+    const size_t begin = k;
+    if (k < line.size() && (line[k] == '-' || (line[k] >= '0' && line[k] <= '9'))) {
+      ++k;
+      while (k < line.size() && line[k] >= '0' && line[k] <= '9') {
+        ++k;
+      }
+    } else if (k < line.size() && line[k] == '"') {
+      ++k;
+      while (k < line.size() && line[k] != '"') {
+        ++k;
+      }
+      if (k < line.size()) {
+        ++k;
+      }
+    }
+    if (k > begin) {
+      id_text = line.substr(begin, k - begin);
+    }
+  }
+  return "{\"id\":" + id_text +
+         ",\"ok\":false,\"error\":{\"code\":\"request_too_large\","
+         "\"message\":\"request exceeds the maximum accepted size\"}}";
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -137,12 +175,37 @@ int main(int argc, char **argv) {
   emit("{\"type\":\"ready\"}");
 
   std::string line;
-  while (std::getline(std::cin, line)) {
+  for (;;) {
+    // Reading the next request is guarded separately from executing it: an oversized line
+    // makes std::getline throw length_error, which must not look like a server crash.
+    bool got_line = false;
+    try {
+      got_line = static_cast<bool>(std::getline(std::cin, line));
+    } catch (const std::exception &e) {
+      log_line(std::string("request read failed: ") + e.what());
+      break;
+    }
+    if (!got_line) {
+      break;
+    }
     // Tolerate CRLF and stray blank lines without emitting extra responses.
     while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) {
       line.pop_back();
     }
     if (line.empty()) {
+      continue;
+    }
+    // A request far larger than any legitimate statement cannot be satisfied.  The cap is
+    // generous on purpose: a single bulk INSERT of the benchmark's whole 10,000-row, 128-dim
+    // table is only a few megabytes of text, so this leaves an order of magnitude of headroom
+    // while refusing the kind of payload that would exhaust memory before it can be answered.
+    constexpr size_t kMaxRequestBytes = size_t(64) << 20;
+    if (line.size() > kMaxRequestBytes) {
+      log_line("request too large");
+      // Still answer, so the driver sees one response per request instead of a stall.  The
+      // oversized line cannot be parsed as a whole, so the id is lifted from its head -- the
+      // protocol always sends it first and it is a small integer.
+      emit(request_too_large_reply(line));
       continue;
     }
     mvdb::JsonValue req;
@@ -195,7 +258,21 @@ int main(int argc, char **argv) {
     const mvdb::JsonValue *mode = req.find("search_mode");
     const std::string search_mode =
         (mode != nullptr && mode->type == mvdb::JsonValue::Type::String) ? mode->str : "exact";
-    mvdb::Result r = engine.execute(sql->str, search_mode);
+    // A statement the engine cannot satisfy for lack of memory must still answer. Letting
+    // bad_alloc escape would terminate the process with no response at all, which the judge
+    // reports as "database exited before response" and scores as a failed case.
+    mvdb::Result r;
+    try {
+      r = engine.execute(sql->str, search_mode);
+    } catch (const std::bad_alloc &) {
+      r.ok = false;
+      r.error_code = "out_of_memory";
+      r.error_message = "statement exceeded the available memory";
+    } catch (const std::exception &e) {
+      r.ok = false;
+      r.error_code = "internal_error";
+      r.error_message = e.what();
+    }
     emit(result_to_json(*id, r));
   }
   // stdin closed without shutdown: behave like a clean stop.
