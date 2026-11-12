@@ -1050,7 +1050,7 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
         // The auxiliary builds are the whole cost of a fulltext index build and they are
         // slice-parallel, so give them twice the requested degree: the request still
         // bounds the work, it is only split more finely.
-        decided_parallelism = MAX(original_parallelism * 2, 2L);
+        decided_parallelism = MAX(original_parallelism, 1L);
         break;
       case share::schema::ObIndexType::INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL:
