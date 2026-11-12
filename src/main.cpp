@@ -157,6 +157,12 @@ std::string request_too_large_reply(const std::string &line) {
          "\"message\":\"request exceeds the maximum accepted size\"}}";
 }
 
+// Largest request line accepted.  Generous on purpose: a bulk INSERT covering the benchmark's
+// whole 10,000-row, 128-dimension table is only a few megabytes of text, so this leaves an
+// order of magnitude of headroom while still refusing a payload that would exhaust memory
+// before it could be answered.
+constexpr size_t kMaxRequestBytes = size_t(64) << 20;
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -176,17 +182,33 @@ int main(int argc, char **argv) {
 
   std::string line;
   for (;;) {
-    // Reading the next request is guarded separately from executing it: an oversized line
-    // makes std::getline throw length_error, which must not look like a server crash.
+    // Reads one request line with C stdio, matching the fwrite used to answer.  Mixing std::cin
+    // with stdio output only happens to work while iostreams stay synced with stdio, and a
+    // desynchronised pair can leave a response sitting in the wrong buffer -- which the driver
+    // sees as a server that never answered.
+    line.clear();
     bool got_line = false;
-    try {
-      got_line = static_cast<bool>(std::getline(std::cin, line));
-    } catch (const std::exception &e) {
-      log_line(std::string("request read failed: ") + e.what());
-      break;
+    int ch = 0;
+    while ((ch = std::fgetc(stdin)) != EOF) {
+      got_line = true;
+      if (ch == '\n') {
+        break;
+      }
+      line.push_back(static_cast<char>(ch));
+      // Bound the buffer before it can grow without limit on an endless line.
+      if (line.size() > kMaxRequestBytes * 2) {
+        log_line("request line too long; draining");
+        while ((ch = std::fgetc(stdin)) != EOF && ch != '\n') {
+        }
+        line.clear();
+        break;
+      }
     }
     if (!got_line) {
       break;
+    }
+    if (line.empty()) {
+      continue;
     }
     // Tolerate CRLF and stray blank lines without emitting extra responses.
     while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) {
@@ -199,7 +221,6 @@ int main(int argc, char **argv) {
     // generous on purpose: a single bulk INSERT of the benchmark's whole 10,000-row, 128-dim
     // table is only a few megabytes of text, so this leaves an order of magnitude of headroom
     // while refusing the kind of payload that would exhaust memory before it can be answered.
-    constexpr size_t kMaxRequestBytes = size_t(64) << 20;
     if (line.size() > kMaxRequestBytes) {
       log_line("request too large");
       // Still answer, so the driver sees one response per request instead of a stall.  The
