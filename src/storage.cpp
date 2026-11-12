@@ -88,6 +88,20 @@ bool write_all(int fd, const char *data, size_t len) {
   return true;
 }
 
+// Flushes a directory entry so a rename or create inside it survives a kill.  Linux allows
+// fsync on a directory opened read-only; the call is a no-op that reports success on platforms
+// that do not, which is why failure here is treated as non-fatal by the callers that can
+// proceed without it.
+bool fsync_dir(const std::string &dir) {
+  const int fd = ::open(dir.c_str(), O_RDONLY);
+  if (fd < 0) {
+    return false;
+  }
+  const int rc = ::fsync(fd);
+  ::close(fd);
+  return rc == 0;
+}
+
 bool read_file(const std::string &path, std::string &out, bool &exists) {
   out.clear();
   exists = true;
@@ -490,17 +504,39 @@ bool Storage::checkpoint(std::string &err) {
     return false;
   }
   ::close(fd);
+  // A checkpoint replaces the snapshot file and then discards the log it covers.  The rename
+  // must be durable *before* the log is dropped, otherwise a crash in between leaves neither
+  // the new snapshot nor the log entries, and committed data disappears -- the task's
+  // "terminate again during recovery" case.  fsync the directory so the rename itself is on
+  // disk, not just the file contents.
+  if (!fsync_dir(dir_)) {
+    err = "cannot flush snapshot directory";
+    return false;
+  }
   if (::rename(tmp.c_str(), snapshot_path_.c_str()) != 0) {
     err = "cannot install snapshot";
     return false;
   }
-  // The snapshot now covers everything in the log.
+  // Durability of the rename is what makes dropping the log safe.
+  if (!fsync_dir(dir_)) {
+    err = "cannot flush snapshot rename";
+    return false;
+  }
+  // The snapshot is now durable and covers everything in the log, so the log can be dropped.
+  // Ordering matters: the rename was flushed above, and only then is the log truncated.  A kill
+  // at any point before this leaves a consistent pair (old snapshot + full log, or new snapshot
+  // + old log that replays onto itself), never a missing suffix.
   if (redo_fd_ >= 0) {
     ::close(redo_fd_);
+    redo_fd_ = -1;
   }
   redo_fd_ = ::open(redo_path_.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
   if (redo_fd_ < 0) {
     err = "cannot reset redo log";
+    return false;
+  }
+  if (!fsync_dir(dir_)) {
+    err = "cannot flush truncated redo log";
     return false;
   }
   return true;
