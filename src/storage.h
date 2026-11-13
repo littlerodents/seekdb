@@ -46,14 +46,21 @@ struct TableSchema {
   static bool equal_ci(const std::string &a, const std::string &b);
 };
 
-// One row keyed by its BIGINT primary key; ordered storage gives free ORDER BY id and
-// deterministic tie-breaking.
 using Row = std::vector<Value>;
-using RowMap = std::map<int64_t, Row>;
+
+// Rows live in a heap file on disk, not in the heap of the process.  The task states the formal
+// tests include a dataset larger than the memory budget and that a full in-memory image cannot
+// pass; a row of BIGINT + VARCHAR(200) + VECTOR(128) costs about 928 bytes resident, so a
+// 1.2M-row table alone would exceed 1 GiB of a 2 GiB container before any query buffer exists.
+//
+// Only the primary-key index stays memory resident.  It is ordered, which gives ORDER BY primary
+// key for free and keeps tie-breaking deterministic, and its value is the byte offset of the row
+// record inside heap.dat.
+using RowIndex = std::map<int64_t, uint64_t>;
 
 struct Table {
   TableSchema schema;
-  RowMap rows;
+  RowIndex rows;
 };
 
 class Storage {
@@ -62,14 +69,25 @@ public:
   // Returns false with err set when the directory is unusable or a file is corrupt
   // beyond the recoverable tail.
   bool open(const std::string &dir, std::string &err);
-  // Checkpoints the current committed state and truncates the redo log.
+  // Rewrites heap.dat compacted (dropping rows replaced by later versions) and truncates the
+  // redo log the snapshot covers.
   bool checkpoint(std::string &err);
 
   bool has_table(const std::string &name) const;
   Table *find_table(const std::string &name);
   const Table *find_table(const std::string &name) const;
-  void put_table(Table &&table);
+  void create_table(const TableSchema &schema);
   void drop_table(const std::string &name);
+
+  // Row access.  get_row materialises one row from the heap file; get_row_at reads the copy an
+  // index entry points at.  Both return false when the row is absent or unreadable.
+  bool get_row(const std::string &table, int64_t pk, Row &out) const;
+  bool has_row(const std::string &table, int64_t pk) const;
+  bool get_row_at(const TableSchema &schema, uint64_t offset, Row &out) const;
+  // Appends a row record and repoints the index at it.  The previous copy stays in the file as
+  // garbage until the next checkpoint compacts it.
+  bool put_row(const std::string &table, int64_t pk, const Row &row, std::string &err);
+  bool erase_row(const std::string &table, int64_t pk, std::string &err);
 
   // Appends one committed statement to the redo log.  `payload` is the serialized
   // operation; the log write is fsynced before returning so an acknowledged commit is
@@ -81,21 +99,28 @@ public:
 
 private:
   bool recover(std::string &err);
-  bool load_snapshot(std::string &err, bool &found);
+  bool load_schema(std::string &err);
+  bool save_schema(std::string &err);
   bool replay_redo(std::string &err);
+  bool apply_redo_payload(const char *payload, size_t len);
+  // Rewrites heap.dat keeping only the records the index points at; the file accumulates a dead
+  // copy every time a row is rewritten.
+  bool compact_heap(std::string &err);
+  // Reads exactly len bytes at offset, growing buf as needed.
+  bool read_at(uint64_t offset, uint32_t len, std::string &buf) const;
 
   std::string dir_;
-  std::string snapshot_path_;
+  std::string heap_path_;
+  std::string schema_path_;
   std::string redo_path_;
+  int heap_fd_ = -1;
   int redo_fd_ = -1;
+  uint64_t heap_size_ = 0;   // append position, also the file's logical length
   std::map<std::string, Table> tables_;
 };
 
 // Serialization helpers shared with the redo log.  Kept simple and explicit so that a
 // truncated or corrupt record is detected rather than misread.
-// Applies one serialized redo payload to a catalogue image (used by recovery).
-bool apply_redo_payload(const char *payload, size_t len, std::map<std::string, Table> &tables);
-
 void encode_value(std::string &out, const Value &v);
 bool decode_value(const char *&p, const char *end, Value &v);
 void encode_schema(std::string &out, const TableSchema &s);

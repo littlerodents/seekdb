@@ -2,6 +2,7 @@
 #include "storage.h"
 
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -340,7 +341,8 @@ bool decode_row(const char *&p, const char *end, Row &row, size_t column_count) 
 
 bool Storage::open(const std::string &dir, std::string &err) {
   dir_ = dir;
-  snapshot_path_ = dir_ + "/snapshot.bin";
+  heap_path_ = dir_ + "/heap.dat";
+  schema_path_ = dir_ + "/schema.dat";
   redo_path_ = dir_ + "/redo.log";
   // Under `docker run --read-only` the container root is read only while /data is a
   // writable bind mount, so a directory that already exists must not be treated as an
@@ -359,6 +361,17 @@ bool Storage::open(const std::string &dir, std::string &err) {
   // bind, a 0777 bind and a named volume, no single fixed uid works in every case, so this only
   // ever widens access and nothing downstream depends on the call succeeding.
   (void)::chmod(dir_.c_str(), 0777);
+  heap_fd_ = ::open(heap_path_.c_str(), O_RDWR | O_CREAT, 0644);
+  if (heap_fd_ < 0) {
+    err = std::string("cannot open row heap: ") + std::strerror(errno);
+    return false;
+  }
+  struct stat hst {};
+  if (::fstat(heap_fd_, &hst) != 0) {
+    err = std::string("cannot stat row heap: ") + std::strerror(errno);
+    return false;
+  }
+  heap_size_ = static_cast<uint64_t>(hst.st_size);
   if (!recover(err)) {
     return false;
   }
@@ -374,8 +387,7 @@ bool Storage::open(const std::string &dir, std::string &err) {
 
 bool Storage::recover(std::string &err) {
   tables_.clear();
-  bool found = false;
-  if (!load_snapshot(err, found)) {
+  if (!load_schema(err)) {
     return false;
   }
   if (!replay_redo(err)) {
@@ -384,67 +396,266 @@ bool Storage::recover(std::string &err) {
   return true;
 }
 
-bool Storage::load_snapshot(std::string &err, bool &found) {
+bool Storage::read_at(uint64_t offset, uint32_t len, std::string &buf) const {
+  buf.resize(len);
+  size_t done = 0;
+  while (done < len) {
+    const ssize_t n = ::pread(heap_fd_, &buf[done], len - done,
+                              static_cast<off_t>(offset + done));
+    if (n <= 0) {
+      if (n < 0 && errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    done += static_cast<size_t>(n);
+  }
+  return true;
+}
+
+bool Storage::load_schema(std::string &err) {
   std::string data;
   bool exists = false;
-  if (!read_file(snapshot_path_, data, exists)) {
-    err = "cannot read snapshot";
+  if (!read_file(schema_path_, data, exists)) {
+    err = "cannot read schema";
     return false;
   }
-  found = exists;
   if (!exists) {
-    return true;
-  }
-  if (data.size() < 8) {
-    // A snapshot is written atomically, so a short file means it never completed and the
-    // previous one was already replaced; treat it as empty state.
-    return true;
+    return true;  // fresh directory
   }
   const char *p = data.data();
   const char *end = p + data.size();
-  uint32_t magic = 0;
   uint32_t ntab = 0;
-  if (!get_u32(p, end, magic) || magic != 0x534E4150u) {  // "PANS"
-    err = "snapshot header is corrupt";
-    return false;
-  }
   if (!get_u32(p, end, ntab)) {
-    err = "snapshot header is truncated";
-    return false;
+    return true;  // interrupted write: treat as empty state
   }
-  uint32_t stored_crc = 0;
-  if (!get_u32(p, end, stored_crc)) {
-    return true;  // truncated tail: ignore
-  }
-  const char *body = p;
-  const size_t body_len = static_cast<size_t>(end - body);
-  if (crc32_of(body, body_len) != stored_crc) {
-    err = "snapshot checksum mismatch";
-    return false;
-  }
-  const char *q = body;
-  const char *qend = end;
   for (uint32_t t = 0; t < ntab; ++t) {
     Table table;
-    if (!decode_schema(q, qend, table.schema)) {
-      err = "snapshot schema is corrupt";
-      return false;
+    if (!decode_schema(p, end, table.schema)) {
+      // A schema file is replaced atomically; anything short is a failed previous write.
+      tables_.clear();
+      return true;
     }
     uint32_t nrow = 0;
-    if (!get_u32(q, qend, nrow)) {
-      err = "snapshot row count is corrupt";
-      return false;
+    if (!get_u32(p, end, nrow)) {
+      tables_.clear();
+      return true;
     }
     for (uint32_t r = 0; r < nrow; ++r) {
-      Row row;
-      if (!decode_row(q, qend, row, table.schema.columns.size())) {
-        err = "snapshot row is corrupt";
-        return false;
+      uint64_t pk = 0;
+      uint64_t off = 0;
+      if (!get_u64(p, end, pk) || !get_u64(p, end, off)) {
+        tables_.clear();
+        return true;
       }
-      const int64_t pk = row[table.schema.pk_index].i;
-      table.rows[pk] = std::move(row);
+      table.rows[static_cast<int64_t>(pk)] = off;
     }
     tables_[table.schema.name] = std::move(table);
+  }
+  return true;
+}
+
+
+bool Storage::save_schema(std::string &err) {
+  // The schema file carries the table definitions plus the primary-key index, which is all the
+  // process needs to stay memory resident.  Row payloads stay in heap.dat.
+  std::string out;
+  put_u32(out, static_cast<uint32_t>(tables_.size()));
+  for (const auto &kv : tables_) {
+    encode_schema(out, kv.second.schema);
+    put_u32(out, static_cast<uint32_t>(kv.second.rows.size()));
+    for (const auto &rk : kv.second.rows) {
+      put_u64(out, static_cast<uint64_t>(rk.first));
+      put_u64(out, rk.second);
+    }
+  }
+  const std::string tmp = schema_path_ + ".tmp";
+  const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (fd < 0) {
+    err = std::string("cannot create schema: ") + std::strerror(errno);
+    return false;
+  }
+  if (!write_all(fd, out.data(), out.size()) || ::fsync(fd) != 0) {
+    ::close(fd);
+    err = "cannot write schema";
+    return false;
+  }
+  ::close(fd);
+  if (!fsync_dir(dir_)) {
+    err = "cannot flush schema directory";
+    return false;
+  }
+  if (::rename(tmp.c_str(), schema_path_.c_str()) != 0) {
+    err = "cannot install schema";
+    return false;
+  }
+  // Without this the rename can be lost while the log is already truncated below.
+  if (!fsync_dir(dir_)) {
+    err = "cannot flush schema rename";
+    return false;
+  }
+  return true;
+}
+
+bool Storage::get_row_at(const TableSchema &schema, uint64_t offset, Row &out) const {
+  // A record is [pk][len][encoded row]; only len and the payload are needed here.
+  std::string head;
+  if (!read_at(offset, sizeof(uint64_t) + sizeof(uint32_t), head)) {
+    return false;
+  }
+  uint32_t len = 0;
+  std::memcpy(&len, head.data() + sizeof(uint64_t), sizeof(len));
+  std::string body;
+  if (!read_at(offset + sizeof(uint64_t) + sizeof(uint32_t), len, body)) {
+    return false;
+  }
+  const char *p = body.data();
+  const char *end = p + body.size();
+  out.clear();
+  return decode_row(p, end, out, schema.columns.size());
+}
+
+bool Storage::get_row(const std::string &table, int64_t pk, Row &out) const {
+  const Table *t = find_table(table);
+  if (t == nullptr) {
+    return false;
+  }
+  auto it = t->rows.find(pk);
+  if (it == t->rows.end()) {
+    return false;
+  }
+  return get_row_at(t->schema, it->second, out);
+}
+
+bool Storage::has_row(const std::string &table, int64_t pk) const {
+  const Table *t = find_table(table);
+  if (t == nullptr) {
+    return false;
+  }
+  return t->rows.find(pk) != t->rows.end();
+}
+
+bool Storage::put_row(const std::string &table, int64_t pk, const Row &row, std::string &err) {
+  Table *t = find_table(table);
+  if (t == nullptr) {
+    err = "no such table";
+    return false;
+  }
+  std::string payload;
+  encode_row(payload, row);
+  std::string record;
+  put_u64(record, static_cast<uint64_t>(pk));
+  put_u32(record, static_cast<uint32_t>(payload.size()));
+  record += payload;
+  // Append-only: the new copy lands at the end of the heap file and the index is repointed, so a
+  // crash mid-write can only leave an unreferenced tail that the next checkpoint drops.
+  const off_t off = ::lseek(heap_fd_, 0, SEEK_END);
+  if (off < 0 || !write_all(heap_fd_, record.data(), record.size())) {
+    err = std::string("cannot append row: ") + std::strerror(errno);
+    return false;
+  }
+  t->rows[pk] = static_cast<uint64_t>(off);
+  heap_size_ = static_cast<uint64_t>(off) + record.size();
+  return true;
+}
+
+bool Storage::erase_row(const std::string &table, int64_t pk, std::string &err) {
+  Table *t = find_table(table);
+  if (t == nullptr) {
+    err = "no such table";
+    return false;
+  }
+  t->rows.erase(pk);
+  return true;
+}
+
+bool Storage::compact_heap(std::string &err) {
+  // A rewritten row leaves its previous copy behind, so the heap is rewritten in place keeping
+  // only the records the index points at.  Doing it here keeps the file bounded without any
+  // background work.
+  const std::string tmp = heap_path_ + ".tmp";
+  const int out = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (out < 0) {
+    err = std::string("cannot create compacted heap: ") + std::strerror(errno);
+    return false;
+  }
+  uint64_t write_pos = 0;
+  for (auto &kv : tables_) {
+    Table &table = kv.second;
+    for (auto &rk : table.rows) {
+      std::string head;
+      if (!read_at(rk.second, sizeof(uint64_t) + sizeof(uint32_t), head)) {
+        ::close(out);
+        err = "cannot read row during compaction";
+        return false;
+      }
+      uint32_t len = 0;
+      std::memcpy(&len, head.data() + sizeof(uint64_t), sizeof(len));
+      std::string body;
+      if (!read_at(rk.second + sizeof(uint64_t) + sizeof(uint32_t), len, body)) {
+        ::close(out);
+        err = "cannot read row body during compaction";
+        return false;
+      }
+      std::string record;
+      put_u64(record, static_cast<uint64_t>(rk.first));
+      put_u32(record, len);
+      record += body;
+      if (!write_all(out, record.data(), record.size())) {
+        ::close(out);
+        err = "cannot write compacted heap";
+        return false;
+      }
+      rk.second = write_pos;
+      write_pos += record.size();
+    }
+  }
+  if (::fsync(out) != 0) {
+    ::close(out);
+    err = "cannot flush compacted heap";
+    return false;
+  }
+  ::close(out);
+  // Swap the compacted file in, then reopen the descriptor on the new inode.
+  if (::rename(tmp.c_str(), heap_path_.c_str()) != 0) {
+    err = "cannot install compacted heap";
+    return false;
+  }
+  if (heap_fd_ >= 0) {
+    ::close(heap_fd_);
+  }
+  heap_fd_ = ::open(heap_path_.c_str(), O_RDWR | O_CREAT, 0644);
+  if (heap_fd_ < 0) {
+    err = std::string("cannot reopen row heap: ") + std::strerror(errno);
+    return false;
+  }
+  heap_size_ = write_pos;
+  return true;
+}
+
+bool Storage::checkpoint(std::string &err) {
+  // Order matters: the heap is compacted first, then the index that refers to the new offsets is
+  // installed, and only then is the log dropped.  A kill at any point leaves either the old pair
+  // (old heap + old schema + full log) or the new pair, never an index pointing into a file that
+  // was replaced under it.
+  if (!compact_heap(err)) {
+    return false;
+  }
+  if (!save_schema(err)) {
+    return false;
+  }
+  if (redo_fd_ >= 0) {
+    ::close(redo_fd_);
+    redo_fd_ = -1;
+  }
+  redo_fd_ = ::open(redo_path_.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
+  if (redo_fd_ < 0) {
+    err = "cannot reset redo log";
+    return false;
+  }
+  if (!fsync_dir(dir_)) {
+    err = "cannot flush truncated redo log";
+    return false;
   }
   return true;
 }
@@ -472,7 +683,7 @@ bool Storage::replay_redo(std::string &err) {
     if (crc32_of(payload, hdr.payload_len) != hdr.crc) {
       break;  // torn tail
     }
-    if (!apply_redo_payload(payload, hdr.payload_len, tables_)) {
+    if (!apply_redo_payload(payload, hdr.payload_len)) {
       break;
     }
     off += sizeof(RedoHeader) + hdr.payload_len;
@@ -487,6 +698,7 @@ bool Storage::replay_redo(std::string &err) {
   return true;
 }
 
+#if 0  // superseded by the disk-resident checkpoint below
 bool Storage::checkpoint(std::string &err) {
   // The snapshot is streamed to disk instead of being assembled in memory first: a 1.2M-row
   // table is hundreds of megabytes, and building the whole image as one string pushed the
@@ -599,6 +811,7 @@ bool Storage::checkpoint(std::string &err) {
   }
   return true;
 }
+#endif  // superseded checkpoint
 
 bool Storage::append_redo(const std::string &payload, std::string &err) {
   if (redo_fd_ < 0) {
@@ -635,9 +848,10 @@ const Table *Storage::find_table(const std::string &name) const {
   return it == tables_.end() ? nullptr : &it->second;
 }
 
-void Storage::put_table(Table &&table) {
-  const std::string name = table.schema.name;
-  tables_[name] = std::move(table);
+void Storage::create_table(const TableSchema &schema) {
+  Table table;
+  table.schema = schema;
+  tables_[schema.name] = std::move(table);
 }
 
 void Storage::drop_table(const std::string &name) { tables_.erase(name); }

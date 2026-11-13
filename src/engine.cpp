@@ -220,7 +220,7 @@ bool coerce_for_column(const Stmt::ColumnDef &col, const Value &in, Value &out,
 
 }  // namespace
 
-bool apply_redo_payload(const char *payload, size_t len, std::map<std::string, Table> &tables) {
+bool Storage::apply_redo_payload(const char *payload, size_t len) {
   const char *p = payload;
   const char *end = payload + len;
   if (end - p < 1) {
@@ -233,7 +233,8 @@ bool apply_redo_payload(const char *payload, size_t len, std::map<std::string, T
       if (!decode_schema(p, end, table.schema)) {
         return false;
       }
-      tables[table.schema.name] = std::move(table);
+      const std::string name = table.schema.name;
+      tables_[name] = std::move(table);
       return true;
     }
     case REDO_CREATE_INDEX: {
@@ -242,8 +243,8 @@ bool apply_redo_payload(const char *payload, size_t len, std::map<std::string, T
       if (!get_str(p, end, table_name) || !get_str(p, end, index_name)) {
         return false;
       }
-      auto it = tables.find(table_name);
-      if (it == tables.end()) {
+      auto it = tables_.find(table_name);
+      if (it == tables_.end()) {
         return false;
       }
       it->second.schema.index_names.push_back(index_name);
@@ -255,8 +256,8 @@ bool apply_redo_payload(const char *payload, size_t len, std::map<std::string, T
       if (!get_str(p, end, table_name) || !get_u32(p, end, nrow)) {
         return false;
       }
-      auto it = tables.find(table_name);
-      if (it == tables.end()) {
+      auto it = tables_.find(table_name);
+      if (it == tables_.end()) {
         return false;
       }
       for (uint32_t r = 0; r < nrow; ++r) {
@@ -264,7 +265,11 @@ bool apply_redo_payload(const char *payload, size_t len, std::map<std::string, T
         if (!decode_row(p, end, row, it->second.schema.columns.size())) {
           return false;
         }
-        it->second.rows[row[it->second.schema.pk_index].i] = std::move(row);
+        const int64_t pk = row[it->second.schema.pk_index].i;
+        std::string err;
+        if (!put_row(table_name, pk, row, err)) {
+          return false;
+        }
       }
       return true;
     }
@@ -274,8 +279,8 @@ bool apply_redo_payload(const char *payload, size_t len, std::map<std::string, T
       if (!get_str(p, end, table_name) || !get_u32(p, end, nrow)) {
         return false;
       }
-      auto it = tables.find(table_name);
-      if (it == tables.end()) {
+      auto it = tables_.find(table_name);
+      if (it == tables_.end()) {
         return false;
       }
       for (uint32_t r = 0; r < nrow; ++r) {
@@ -283,7 +288,11 @@ bool apply_redo_payload(const char *payload, size_t len, std::map<std::string, T
         if (!decode_row(p, end, row, it->second.schema.columns.size())) {
           return false;
         }
-        it->second.rows[row[it->second.schema.pk_index].i] = std::move(row);
+        const int64_t pk = row[it->second.schema.pk_index].i;
+        std::string err;
+        if (!put_row(table_name, pk, row, err)) {
+          return false;
+        }
       }
       return true;
     }
@@ -293,8 +302,8 @@ bool apply_redo_payload(const char *payload, size_t len, std::map<std::string, T
       if (!get_str(p, end, table_name) || !get_u32(p, end, nrow)) {
         return false;
       }
-      auto it = tables.find(table_name);
-      if (it == tables.end()) {
+      auto it = tables_.find(table_name);
+      if (it == tables_.end()) {
         return false;
       }
       for (uint32_t r = 0; r < nrow; ++r) {
@@ -302,7 +311,10 @@ bool apply_redo_payload(const char *payload, size_t len, std::map<std::string, T
         if (!get_u64(p, end, pk)) {
           return false;
         }
-        it->second.rows.erase(static_cast<int64_t>(pk));
+        std::string err;
+        if (!erase_row(table_name, static_cast<int64_t>(pk), err)) {
+          return false;
+        }
       }
       return true;
     }
@@ -404,7 +416,7 @@ Result Engine::exec_create_table(const Stmt &stmt) {
   if (vector_count > 1) {
     return make_error("invalid_schema", "at most one vector column is allowed");
   }
-  storage_.put_table(std::move(table));
+  storage_.create_table(table.schema);
   Result r;
   return r;
 }
@@ -452,7 +464,7 @@ Result Engine::exec_insert(const Stmt &stmt) {
       row.push_back(std::move(v));
     }
     const int64_t pk = row[static_cast<size_t>(t->schema.pk_index)].i;
-    if (t->rows.find(pk) != t->rows.end() || seen.find(pk) != seen.end()) {
+    if (storage_.has_row(stmt.table, pk) || seen.find(pk) != seen.end()) {
       return make_error("duplicate_key", "duplicate primary key");
     }
     seen[pk] = true;
@@ -462,7 +474,10 @@ Result Engine::exec_insert(const Stmt &stmt) {
     const int64_t pk = row[static_cast<size_t>(t->schema.pk_index)].i;
     // Validated above, so the row is new: the undo entry records that it must disappear again.
     note_undo(stmt.table, pk);
-    t->rows[pk] = std::move(row);
+    std::string err;
+    if (!storage_.put_row(stmt.table, pk, row, err)) {
+      return make_error("io_error", err.c_str());
+    }
   }
   Result r;
   r.has_affected_rows = true;
@@ -494,10 +509,15 @@ Result Engine::exec_update(const Stmt &stmt, std::vector<Row> &changed) {
   }
   // Collect every matching row before touching any of them: a WHERE that fails part-way through
   // must leave the statement with no effect at all, which statement-level atomicity requires.
+  // Rows are materialised one at a time and dropped again, so the scan does not hold the table.
   std::vector<int64_t> hits;
   for (const auto &kv : t->rows) {
+    Row row;
+    if (!storage_.get_row_at(t->schema, kv.second, row)) {
+      return make_error("io_error", "cannot read row");
+    }
     std::string err;
-    if (!row_matches(*t, kv.second, stmt.where, err)) {
+    if (!row_matches(*t, row, stmt.where, err)) {
       if (!err.empty()) {
         return make_error("invalid_where", err.c_str());
       }
@@ -506,18 +526,22 @@ Result Engine::exec_update(const Stmt &stmt, std::vector<Row> &changed) {
     hits.push_back(kv.first);
   }
   for (int64_t pk : hits) {
-    auto it = t->rows.find(pk);
-    if (it == t->rows.end()) {
+    Row row;
+    if (!storage_.get_row(stmt.table, pk, row)) {
       continue;
     }
     note_undo(stmt.table, pk);
     for (const auto &u : updates) {
-      it->second[u.first] = u.second;
+      row[u.first] = u.second;
+    }
+    std::string werr;
+    if (!storage_.put_row(stmt.table, pk, row, werr)) {
+      return make_error("io_error", werr.c_str());
     }
     // Report the changed rows directly.  The redo encoder used to take a deep copy of the whole
     // table and diff against it, which at 1.2M rows allocates hundreds of megabytes per
     // statement and was what the kernel killed.
-    changed.push_back(it->second);
+    changed.push_back(std::move(row));
   }
   Result r;
   r.has_affected_rows = true;
@@ -532,8 +556,12 @@ Result Engine::exec_delete(const Stmt &stmt, std::vector<int64_t> &removed) {
   }
   std::vector<int64_t> doomed;
   for (const auto &kv : t->rows) {
+    Row row;
+    if (!storage_.get_row_at(t->schema, kv.second, row)) {
+      return make_error("io_error", "cannot read row");
+    }
     std::string err;
-    if (!row_matches(*t, kv.second, stmt.where, err)) {
+    if (!row_matches(*t, row, stmt.where, err)) {
       if (!err.empty()) {
         return make_error("invalid_where", err.c_str());
       }
@@ -543,7 +571,10 @@ Result Engine::exec_delete(const Stmt &stmt, std::vector<int64_t> &removed) {
   }
   for (int64_t pk : doomed) {
     note_undo(stmt.table, pk);
-    t->rows.erase(pk);
+    std::string derr;
+    if (!storage_.erase_row(stmt.table, pk, derr)) {
+      return make_error("io_error", derr.c_str());
+    }
   }
   // The deleted keys are reported straight out, instead of being recovered by diffing a
   // full-table copy the way the redo encoder used to.
@@ -581,18 +612,24 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
       return make_error("invalid_argument", "L2_DISTANCE requires a vector column");
     }
   }
-  // Filter.
-  std::vector<const std::pair<const int64_t, Row> *> matched;
+  // Filter.  Only primary keys are collected here; each row is materialised when it is actually
+  // needed.  Keeping whole rows for every match would put the table back in memory, which is the
+  // thing the disk-resident layout exists to avoid.
+  std::vector<const int64_t *> matched;
   matched.reserve(t->rows.size());
   for (const auto &kv : t->rows) {
+    Row row;
+    if (!storage_.get_row_at(t->schema, kv.second, row)) {
+      return make_error("io_error", "cannot read row");
+    }
     std::string err;
-    if (!row_matches(*t, kv.second, stmt.where, err)) {
+    if (!row_matches(*t, row, stmt.where, err)) {
       if (!err.empty()) {
         return make_error("invalid_where", err.c_str());
       }
       continue;
     }
-    matched.push_back(&kv);
+    matched.push_back(&kv.first);
   }
   // ORDER BY resolves to either a projected column/alias or an L2_DISTANCE term.  The term
   // may be written inline (ORDER BY L2_DISTANCE(col,'[...]')) or refer to a projected
@@ -661,84 +698,55 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
     const int64_t pos = t->schema.column_pos(it.l2_column);
     return l2_distance_sq(row[static_cast<size_t>(pos)].v, it.l2_query);
   };
+  // Sorting compares rows by materialising the two being compared.  A large scan therefore reads
+  // its rows repeatedly instead of holding them all, which trades I/O for the memory bound the
+  // task requires.
+  auto row_at = [&](const int64_t *pk, Row &out) { return storage_.get_row(stmt.table, *pk, out); };
   const int64_t pk_index = t->schema.pk_index;
-  if (!keys.empty()) {
-    std::stable_sort(matched.begin(), matched.end(),
-                     [&](const std::pair<const int64_t, Row> *a,
-                         const std::pair<const int64_t, Row> *b) {
-                       for (const auto &key : keys) {
-                         if (key.by_l2) {
-                           const double da = dist_sq_of(a->second, key);
-                           const double db = dist_sq_of(b->second, key);
-                           const double eps = 1e-12;
-                           if (da < db - eps) {
-                             return !key.desc;
-                           }
-                           if (da > db + eps) {
-                             return key.desc;
-                           }
-                         } else {
-                           const Value *va = value_of(a->second, key);
-                           const Value *vb = value_of(b->second, key);
-                           if (va != nullptr && vb != nullptr) {
-                             int cmp = 0;
-                             if (va->type == ColType::BIGINT && vb->type == ColType::BIGINT) {
-                               cmp = va->i < vb->i ? -1 : (va->i > vb->i ? 1 : 0);
-                             } else if (va->type == ColType::VARCHAR &&
-                                        vb->type == ColType::VARCHAR) {
-                               cmp = compare_varchar(va->s, vb->s);
-                             }
-                             if (cmp != 0) {
-                               return key.desc ? cmp > 0 : cmp < 0;
-                             }
-                           }
-                         }
-                       }
-                       // Ties break on primary key ascending, as the task specifies.
-                       return a->second[static_cast<size_t>(pk_index)].i <
-                              b->second[static_cast<size_t>(pk_index)].i;
-                     });
-  }
-  // A LIMIT with an ORDER BY only needs the first N elements; a full sort of a large
-  // match set is pure overhead when N is small.  Partial selection keeps the same
-  // ordering (the comparator is a strict weak order and we take a prefix).
-  if (stmt.limit >= 0 && static_cast<int64_t>(matched.size()) > stmt.limit
-      && !keys.empty() && stmt.limit > 0) {
-    const auto cmp = [&](const std::pair<const int64_t, Row> *a,
-                         const std::pair<const int64_t, Row> *b) {
-      for (const auto &key : keys) {
-        if (key.by_l2) {
-          const double da = dist_sq_of(a->second, key);
-          const double db = dist_sq_of(b->second, key);
-          const double eps = 1e-12;
-          if (da < db - eps) {
-            return !key.desc;
+  const auto cmp_pk = [&](const int64_t *a, const int64_t *b) {
+    Row ra, rb;
+    if (!row_at(a, ra) || !row_at(b, rb)) {
+      return *a < *b;  // unreadable rows still need a total order
+    }
+    for (const auto &key : keys) {
+      if (key.by_l2) {
+        const double da = dist_sq_of(ra, key);
+        const double db = dist_sq_of(rb, key);
+        const double eps = 1e-12;
+        if (da < db - eps) {
+          return !key.desc;
+        }
+        if (da > db + eps) {
+          return key.desc;
+        }
+      } else {
+        const Value *va = value_of(ra, key);
+        const Value *vb = value_of(rb, key);
+        if (va != nullptr && vb != nullptr) {
+          int c = 0;
+          if (va->type == ColType::BIGINT && vb->type == ColType::BIGINT) {
+            c = va->i < vb->i ? -1 : (va->i > vb->i ? 1 : 0);
+          } else if (va->type == ColType::VARCHAR && vb->type == ColType::VARCHAR) {
+            c = compare_varchar(va->s, vb->s);
           }
-          if (da > db + eps) {
-            return key.desc;
-          }
-        } else {
-          const Value *va = value_of(a->second, key);
-          const Value *vb = value_of(b->second, key);
-          if (va != nullptr && vb != nullptr) {
-            int c = 0;
-            if (va->type == ColType::BIGINT && vb->type == ColType::BIGINT) {
-              c = va->i < vb->i ? -1 : (va->i > vb->i ? 1 : 0);
-            } else if (va->type == ColType::VARCHAR && vb->type == ColType::VARCHAR) {
-              c = compare_varchar(va->s, vb->s);
-            }
-            if (c != 0) {
-              return key.desc ? c > 0 : c < 0;
-            }
+          if (c != 0) {
+            return key.desc ? c > 0 : c < 0;
           }
         }
       }
-      return a->second[static_cast<size_t>(pk_index)].i <
-             b->second[static_cast<size_t>(pk_index)].i;
-    };
-    std::nth_element(matched.begin(), matched.begin() + stmt.limit, matched.end(), cmp);
-    matched.resize(static_cast<size_t>(stmt.limit));
-    std::sort(matched.begin(), matched.end(), cmp);
+    }
+    // Ties break on primary key ascending, as the task specifies.
+    (void)pk_index;
+    return *a < *b;
+  };
+  if (!keys.empty()) {
+    // A LIMIT with an ORDER BY only needs the first N; selecting a prefix keeps the number of
+    // row reads proportional to the work actually required.
+    if (stmt.limit > 0 && static_cast<int64_t>(matched.size()) > stmt.limit) {
+      std::nth_element(matched.begin(), matched.begin() + stmt.limit, matched.end(), cmp_pk);
+      matched.resize(static_cast<size_t>(stmt.limit));
+    }
+    std::sort(matched.begin(), matched.end(), cmp_pk);
   } else if (stmt.limit >= 0 && static_cast<int64_t>(matched.size()) > stmt.limit) {
     matched.resize(static_cast<size_t>(stmt.limit));
   }
@@ -751,17 +759,21 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
     r.columns.push_back(name);
   }
   r.rows.reserve(matched.size());
-  for (const auto *kv : matched) {
+  for (const auto *pk : matched) {
+    Row row;
+    if (!row_at(pk, row)) {
+      return make_error("io_error", "cannot read row");
+    }
     std::vector<Value> out;
     out.reserve(items.size());
     for (const auto &it : items) {
       if (it.is_l2) {
         const int64_t pos = t->schema.column_pos(it.l2_column);
-        const double dist = l2_distance(kv->second[static_cast<size_t>(pos)].v, it.l2_query);
+        const double dist = l2_distance(row[static_cast<size_t>(pos)].v, it.l2_query);
         out.push_back(Value::make_double(dist));
       } else {
         const int64_t pos = t->schema.column_pos(it.column);
-        out.push_back(kv->second[static_cast<size_t>(pos)]);
+        out.push_back(row[static_cast<size_t>(pos)]);
       }
     }
     r.rows.push_back(std::move(out));
@@ -783,13 +795,10 @@ void Engine::note_undo(const std::string &table, int64_t pk) {
   UndoEntry entry;
   entry.table = table;
   entry.pk = pk;
-  const Table *t = storage_.find_table(table);
-  if (t != nullptr) {
-    auto it = t->rows.find(pk);
-    if (it != t->rows.end()) {
-      entry.existed = true;
-      entry.before = it->second;
-    }
+  Row before;
+  if (storage_.get_row(table, pk, before)) {
+    entry.existed = true;
+    entry.before = std::move(before);
   }
   undo_.push_back(std::move(entry));
 }
@@ -841,14 +850,14 @@ Result Engine::exec_rollback() {
   }
   // Undo in reverse order so a row written by several statements ends at its original value.
   for (auto it = undo_.rbegin(); it != undo_.rend(); ++it) {
-    Table *t = storage_.find_table(it->table);
-    if (t == nullptr) {
+    if (storage_.find_table(it->table) == nullptr) {
       continue;
     }
+    std::string err;
     if (it->existed) {
-      t->rows[it->pk] = it->before;
+      (void)storage_.put_row(it->table, it->pk, it->before, err);
     } else {
-      t->rows.erase(it->pk);
+      (void)storage_.erase_row(it->table, it->pk, err);
     }
   }
   undo_.clear();
