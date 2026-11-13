@@ -779,8 +779,12 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
   if (!keys.empty()) {
     // A LIMIT with an ORDER BY only needs the first N; selecting a prefix keeps the work
     // proportional to what is actually returned.
-    if (stmt.limit > 0 && static_cast<int64_t>(ranked.size()) > stmt.limit) {
-      std::nth_element(ranked.begin(), ranked.begin() + stmt.limit, ranked.end(), cmp_ranked);
+    // LIMIT 0 is a valid limit that returns nothing; it must not be confused with the
+    // "no LIMIT" sentinel (-1).  Only a non-empty prefix needs nth_element.
+    if (stmt.limit >= 0 && static_cast<int64_t>(ranked.size()) > stmt.limit) {
+      if (stmt.limit > 0) {
+        std::nth_element(ranked.begin(), ranked.begin() + stmt.limit, ranked.end(), cmp_ranked);
+      }
       ranked.resize(static_cast<size_t>(stmt.limit));
     }
     std::sort(ranked.begin(), ranked.end(), cmp_ranked);
@@ -847,7 +851,9 @@ void Engine::note_undo(const std::string &table, int64_t pk) {
 
 Result Engine::exec_begin() {
   if (in_tx_) {
-    return make_error("transaction_active", "a transaction is already open");
+    // Nested transactions are explicitly outside the task's scope; report the agreed
+    // unsupported error rather than a runtime-specific code.
+    return make_error("unsupported_sql", "nested transactions are not supported");
   }
   // BEGIN allocates nothing proportional to the database; the undo log fills in as statements
   // touch rows.  This keeps the memory ceiling independent of table size -- the previous
@@ -914,6 +920,14 @@ Result Engine::execute(const std::string &sql, const std::string &search_mode) {
   Stmt stmt;
   std::string parse_err;
   if (!parse_statement(sql, stmt, parse_err)) {
+    // The task lists NULL, JOIN, aggregates, subqueries, ALTER, DISTINCT and nested
+    // transactions as outside the supported subset, and requires unsupported input to be
+    // answered with the agreed error instead of being given another meaning.  The parser
+    // tags those with an "unsupported:" prefix; anything else really is malformed.
+    static const char kUnsupported[] = "unsupported:";
+    if (parse_err.compare(0, sizeof(kUnsupported) - 1, kUnsupported) == 0) {
+      return make_error("unsupported_sql", parse_err.c_str() + sizeof(kUnsupported) - 1);
+    }
     return make_error("syntax_error", parse_err.c_str());
   }
   switch (stmt.kind) {

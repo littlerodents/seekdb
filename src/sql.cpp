@@ -149,7 +149,7 @@ bool parse_literal(Parser &p, Value &out) {
     // NULL is outside the supported subset, and the task requires unsupported input to be
     // rejected rather than silently given some other meaning -- accepting it would put a value
     // into a column that no comparison or vector operation is defined for.
-    p.err = "NULL is not supported";
+    p.err = "unsupported:NULL is not supported";
     return false;
   }
   p.err = "expected literal";
@@ -177,6 +177,11 @@ bool parse_where(Parser &p, WhereClause &where) {
       } else {
         c.op = CmpOp::GT;
       }
+    } else if (p.kw("IN") || p.kw("EXISTS") || p.kw("LIKE") || p.kw("BETWEEN")) {
+      // Subqueries and the other predicate forms are outside the supported subset; they are
+      // reported as unsupported so the driver sees the agreed error code.
+      p.err = "unsupported:statement is not supported";
+      return false;
     } else {
       p.err = "expected comparison operator";
       return false;
@@ -185,6 +190,10 @@ bool parse_where(Parser &p, WhereClause &where) {
       return false;
     }
     where.conds.push_back(std::move(c));
+    if (p.kw("OR")) {
+      p.err = "unsupported:OR is not supported";
+      return false;
+    }
     if (!p.eat_kw("AND")) {
       break;
     }
@@ -193,6 +202,12 @@ bool parse_where(Parser &p, WhereClause &where) {
 }
 
 bool parse_select_items(Parser &p, Stmt &stmt) {
+  if (p.kw("DISTINCT")) {
+    // DISTINCT is outside the supported subset; answer with the agreed unsupported error
+    // rather than letting the statement fail later as a generic syntax error.
+    p.err = "unsupported:DISTINCT is not supported";
+    return false;
+  }
   if (p.eat_punct('*')) {
     SelectItem item;
     item.star = true;
@@ -228,6 +243,13 @@ bool parse_select_items(Parser &p, Stmt &stmt) {
         return false;
       }
     } else if (!p.ident(item.column)) {
+      return false;
+    }
+    if (p.punct('(')) {
+      // Only L2_DISTANCE is part of this task's SQL subset.  A bare function call here is
+      // an aggregate or scalar function the task does not require, so report it as
+      // unsupported instead of a syntax error.
+      p.err = "unsupported:function is not supported";
       return false;
     }
     if (p.eat_kw("AS")) {
@@ -435,6 +457,11 @@ bool parse_select(Parser &p, Stmt &stmt) {
     return false;
   }
   if (!p.ident(stmt.table)) {
+    return false;
+  }
+  if (p.kw("JOIN") || p.kw("INNER") || p.kw("LEFT") || p.kw("RIGHT") || p.kw("CROSS") ||
+      p.kw("GROUP") || p.kw("HAVING") || p.kw("UNION") || p.kw("IN") || p.kw("EXISTS")) {
+    p.err = "unsupported:statement is not supported";
     return false;
   }
   if (p.eat_kw("WHERE")) {
