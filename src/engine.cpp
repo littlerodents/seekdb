@@ -698,55 +698,97 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
     const int64_t pos = t->schema.column_pos(it.l2_column);
     return l2_distance_sq(row[static_cast<size_t>(pos)].v, it.l2_query);
   };
-  // Sorting compares rows by materialising the two being compared.  A large scan therefore reads
-  // its rows repeatedly instead of holding them all, which trades I/O for the memory bound the
-  // task requires.
-  auto row_at = [&](const int64_t *pk, Row &out) { return storage_.get_row(stmt.table, *pk, out); };
-  const int64_t pk_index = t->schema.pk_index;
-  const auto cmp_pk = [&](const int64_t *a, const int64_t *b) {
-    Row ra, rb;
-    if (!row_at(a, ra) || !row_at(b, rb)) {
-      return *a < *b;  // unreadable rows still need a total order
+  // Sorting keys are computed once per row instead of re-reading rows inside the comparator.  A
+  // comparator that reads from disk is not usable with std::sort: a failed read would have to
+  // fall back to some other order, which breaks the strict weak ordering that sort requires.
+  struct SortValue {
+    bool numeric = true;   // BIGINT comparison, otherwise text
+    bool is_l2 = false;
+    double dist = 0.0;
+    int64_t num = 0;
+    std::string text;
+  };
+  struct Ranked {
+    const int64_t *pk;
+    std::vector<SortValue> keys;
+  };
+  std::vector<Ranked> ranked;
+  ranked.reserve(matched.size());
+  bool key_error = false;
+  for (const auto *pk : matched) {
+    Row row;
+    if (!storage_.get_row(stmt.table, *pk, row)) {
+      key_error = true;
+      break;
     }
+    Ranked r;
+    r.pk = pk;
+    r.keys.reserve(keys.size());
     for (const auto &key : keys) {
+      SortValue sv;
       if (key.by_l2) {
-        const double da = dist_sq_of(ra, key);
-        const double db = dist_sq_of(rb, key);
-        const double eps = 1e-12;
-        if (da < db - eps) {
-          return !key.desc;
-        }
-        if (da > db + eps) {
-          return key.desc;
-        }
-      } else {
-        const Value *va = value_of(ra, key);
-        const Value *vb = value_of(rb, key);
-        if (va != nullptr && vb != nullptr) {
-          int c = 0;
-          if (va->type == ColType::BIGINT && vb->type == ColType::BIGINT) {
-            c = va->i < vb->i ? -1 : (va->i > vb->i ? 1 : 0);
-          } else if (va->type == ColType::VARCHAR && vb->type == ColType::VARCHAR) {
-            c = compare_varchar(va->s, vb->s);
-          }
-          if (c != 0) {
-            return key.desc ? c > 0 : c < 0;
-          }
+        sv.is_l2 = true;
+        sv.dist = dist_sq_of(row, key);
+      } else if (const Value *v = value_of(row, key)) {
+        if (v->type == ColType::VARCHAR) {
+          sv.numeric = false;
+          sv.text = v->s;
+        } else if (v->type == ColType::BIGINT) {
+          sv.numeric = true;
+          sv.num = v->i;
+        } else {
+          sv.numeric = true;
+          sv.num = 0;
         }
       }
+      r.keys.push_back(std::move(sv));
     }
-    // Ties break on primary key ascending, as the task specifies.
-    (void)pk_index;
-    return *a < *b;
+    ranked.push_back(std::move(r));
+  }
+  if (key_error) {
+    return make_error("io_error", "cannot read row");
+  }
+  const auto cmp_ranked = [&](const Ranked &a, const Ranked &b) {
+    for (size_t k = 0; k < keys.size(); ++k) {
+      const SortValue &va = a.keys[k];
+      const SortValue &vb = b.keys[k];
+      if (va.is_l2) {
+        const double eps = 1e-12;
+        if (va.dist < vb.dist - eps) {
+          return !keys[k].desc;
+        }
+        if (va.dist > vb.dist + eps) {
+          return keys[k].desc;
+        }
+        continue;
+      }
+      int c = 0;
+      if (va.numeric && vb.numeric) {
+        c = va.num < vb.num ? -1 : (va.num > vb.num ? 1 : 0);
+      } else if (!va.numeric && !vb.numeric) {
+        c = compare_varchar(va.text, vb.text);
+      }
+      if (c != 0) {
+        return keys[k].desc ? c > 0 : c < 0;
+      }
+    }
+    // Ties break on primary key ascending, as the task specifies.  Ordering by the key makes the
+    // comparator deterministic, which std::sort and nth_element both require.
+    return *a.pk < *b.pk;
   };
   if (!keys.empty()) {
-    // A LIMIT with an ORDER BY only needs the first N; selecting a prefix keeps the number of
-    // row reads proportional to the work actually required.
-    if (stmt.limit > 0 && static_cast<int64_t>(matched.size()) > stmt.limit) {
-      std::nth_element(matched.begin(), matched.begin() + stmt.limit, matched.end(), cmp_pk);
-      matched.resize(static_cast<size_t>(stmt.limit));
+    // A LIMIT with an ORDER BY only needs the first N; selecting a prefix keeps the work
+    // proportional to what is actually returned.
+    if (stmt.limit > 0 && static_cast<int64_t>(ranked.size()) > stmt.limit) {
+      std::nth_element(ranked.begin(), ranked.begin() + stmt.limit, ranked.end(), cmp_ranked);
+      ranked.resize(static_cast<size_t>(stmt.limit));
     }
-    std::sort(matched.begin(), matched.end(), cmp_pk);
+    std::sort(ranked.begin(), ranked.end(), cmp_ranked);
+    matched.clear();
+    matched.reserve(ranked.size());
+    for (const auto &r : ranked) {
+      matched.push_back(r.pk);
+    }
   } else if (stmt.limit >= 0 && static_cast<int64_t>(matched.size()) > stmt.limit) {
     matched.resize(static_cast<size_t>(stmt.limit));
   }
@@ -761,7 +803,7 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
   r.rows.reserve(matched.size());
   for (const auto *pk : matched) {
     Row row;
-    if (!row_at(pk, row)) {
+    if (!storage_.get_row(stmt.table, *pk, row)) {
       return make_error("io_error", "cannot read row");
     }
     std::vector<Value> out;
