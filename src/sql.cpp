@@ -178,8 +178,7 @@ bool parse_where(Parser &p, WhereClause &where) {
         c.op = CmpOp::GT;
       }
     } else if (p.kw("IN") || p.kw("EXISTS") || p.kw("LIKE") || p.kw("BETWEEN")) {
-      // Subqueries and the other predicate forms are outside the supported subset; they are
-      // reported as unsupported so the driver sees the agreed error code.
+      // Subqueries and the other predicate forms are outside the supported subset.
       p.err = "unsupported:statement is not supported";
       return false;
     } else {
@@ -217,6 +216,22 @@ bool parse_select_items(Parser &p, Stmt &stmt) {
   for (;;) {
     SelectItem item;
     if (!p.at_end() && p.cur().type == TokType::IDENT &&
+        to_upper(p.cur().text) == "COUNT") {
+      // COUNT(*) or COUNT(col): the one aggregate the task's SQL subset needs.
+      ++p.pos;
+      if (!p.expect_punct('(')) {
+        return false;
+      }
+      item.is_count = true;
+      if (p.eat_punct('*')) {
+        item.count_star = true;
+      } else if (!p.ident(item.count_column)) {
+        return false;
+      }
+      if (!p.expect_punct(')')) {
+        return false;
+      }
+    } else if (!p.at_end() && p.cur().type == TokType::IDENT &&
         to_upper(p.cur().text) == "L2_DISTANCE") {
       ++p.pos;
       if (!p.expect_punct('(')) {
@@ -246,8 +261,8 @@ bool parse_select_items(Parser &p, Stmt &stmt) {
       return false;
     }
     if (p.punct('(')) {
-      // Only L2_DISTANCE is part of this task's SQL subset.  A bare function call here is
-      // an aggregate or scalar function the task does not require, so report it as
+      // Only L2_DISTANCE and COUNT are part of this task's SQL subset.  Any other function
+      // here is an aggregate or scalar the task does not require, so report it as
       // unsupported instead of a syntax error.
       p.err = "unsupported:function is not supported";
       return false;

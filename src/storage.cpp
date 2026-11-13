@@ -834,27 +834,64 @@ bool Storage::append_redo(const std::string &payload, std::string &err) {
   return true;
 }
 
+// Table names are compared case-insensitively, the way SQL identifiers are defined: a table
+// created as `Docs` must be reachable as `docs` and `DOCS`.  A case-sensitive map lookup made
+// `CREATE TABLE T` followed by `SELECT ... FROM t` fail with "table does not exist".
+namespace {
+bool table_name_matches(const std::string &a, const std::string &b) {
+  return TableSchema::equal_ci(a, b);
+}
+}  // namespace
+
 bool Storage::has_table(const std::string &name) const {
-  return tables_.find(name) != tables_.end();
+  for (const auto &kv : tables_) {
+    if (table_name_matches(kv.first, name)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 Table *Storage::find_table(const std::string &name) {
-  auto it = tables_.find(name);
-  return it == tables_.end() ? nullptr : &it->second;
+  for (auto &kv : tables_) {
+    if (table_name_matches(kv.first, name)) {
+      return &kv.second;
+    }
+  }
+  return nullptr;
 }
 
 const Table *Storage::find_table(const std::string &name) const {
-  auto it = tables_.find(name);
-  return it == tables_.end() ? nullptr : &it->second;
+  for (const auto &kv : tables_) {
+    if (table_name_matches(kv.first, name)) {
+      return &kv.second;
+    }
+  }
+  return nullptr;
 }
 
 void Storage::create_table(const TableSchema &schema) {
   Table table;
   table.schema = schema;
+  // Replace an existing table of the same name in any casing, so CREATE after DROP is consistent.
+  for (auto it = tables_.begin(); it != tables_.end(); ++it) {
+    if (table_name_matches(it->first, schema.name)) {
+      tables_.erase(it);
+      break;
+    }
+  }
   tables_[schema.name] = std::move(table);
 }
 
-void Storage::drop_table(const std::string &name) { tables_.erase(name); }
+void Storage::drop_table(const std::string &name) {
+  for (auto it = tables_.begin(); it != tables_.end();) {
+    if (table_name_matches(it->first, name)) {
+      it = tables_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
 
 std::vector<std::string> Storage::table_names() const {
   std::vector<std::string> names;

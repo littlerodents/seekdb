@@ -165,6 +165,10 @@ struct SelectItem {
   std::string l2_column;
   std::vector<float> l2_query;
   bool l2_valid = false;
+  // COUNT(*) / COUNT(col): a single-row aggregate, which is the only aggregate the task allows.
+  bool is_count = false;
+  bool count_star = false;
+  std::string count_column;
 };
 
 struct Stmt {

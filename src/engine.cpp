@@ -243,11 +243,11 @@ bool Storage::apply_redo_payload(const char *payload, size_t len) {
       if (!get_str(p, end, table_name) || !get_str(p, end, index_name)) {
         return false;
       }
-      auto it = tables_.find(table_name);
-      if (it == tables_.end()) {
+      Table *tbl = find_table(table_name);
+      if (tbl == nullptr) {
         return false;
       }
-      it->second.schema.index_names.push_back(index_name);
+      tbl->schema.index_names.push_back(index_name);
       return true;
     }
     case REDO_INSERT_ROWS: {
@@ -256,16 +256,16 @@ bool Storage::apply_redo_payload(const char *payload, size_t len) {
       if (!get_str(p, end, table_name) || !get_u32(p, end, nrow)) {
         return false;
       }
-      auto it = tables_.find(table_name);
-      if (it == tables_.end()) {
+      Table *tbl = find_table(table_name);
+      if (tbl == nullptr) {
         return false;
       }
       for (uint32_t r = 0; r < nrow; ++r) {
         Row row;
-        if (!decode_row(p, end, row, it->second.schema.columns.size())) {
+        if (!decode_row(p, end, row, tbl->schema.columns.size())) {
           return false;
         }
-        const int64_t pk = row[it->second.schema.pk_index].i;
+        const int64_t pk = row[tbl->schema.pk_index].i;
         std::string err;
         if (!put_row(table_name, pk, row, err)) {
           return false;
@@ -279,16 +279,16 @@ bool Storage::apply_redo_payload(const char *payload, size_t len) {
       if (!get_str(p, end, table_name) || !get_u32(p, end, nrow)) {
         return false;
       }
-      auto it = tables_.find(table_name);
-      if (it == tables_.end()) {
+      Table *tbl = find_table(table_name);
+      if (tbl == nullptr) {
         return false;
       }
       for (uint32_t r = 0; r < nrow; ++r) {
         Row row;
-        if (!decode_row(p, end, row, it->second.schema.columns.size())) {
+        if (!decode_row(p, end, row, tbl->schema.columns.size())) {
           return false;
         }
-        const int64_t pk = row[it->second.schema.pk_index].i;
+        const int64_t pk = row[tbl->schema.pk_index].i;
         std::string err;
         if (!put_row(table_name, pk, row, err)) {
           return false;
@@ -302,8 +302,8 @@ bool Storage::apply_redo_payload(const char *payload, size_t len) {
       if (!get_str(p, end, table_name) || !get_u32(p, end, nrow)) {
         return false;
       }
-      auto it = tables_.find(table_name);
-      if (it == tables_.end()) {
+      Table *tbl = find_table(table_name);
+      if (tbl == nullptr) {
         return false;
       }
       for (uint32_t r = 0; r < nrow; ++r) {
@@ -603,6 +603,15 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
   }
   // Validate referenced columns.
   for (const auto &it : items) {
+    if (it.is_count) {
+      if (!it.count_star) {
+        const int64_t pos = t->schema.column_pos(it.count_column);
+        if (pos < 0) {
+          return make_error("no_such_column", "column does not exist");
+        }
+      }
+      continue;
+    }
     const std::string &name = it.is_l2 ? it.l2_column : it.column;
     const int64_t pos = t->schema.column_pos(name);
     if (pos < 0) {
@@ -630,6 +639,31 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
       continue;
     }
     matched.push_back(&kv.first);
+  }
+  // An aggregate collapses the match set into one row, so it bypasses ordering and LIMIT: there
+  // is exactly one result row and it always carries its column name.
+  bool has_count = false;
+  for (const auto &it : items) {
+    if (it.is_count) {
+      has_count = true;
+      break;
+    }
+  }
+  if (has_count) {
+    Result r;
+    std::vector<Value> out;
+    for (const auto &it : items) {
+      std::string name = it.alias;
+      if (name.empty()) {
+        name = it.is_count ? "count(*)" : "count";
+      }
+      r.columns.push_back(name);
+      if (it.is_count) {
+        out.push_back(Value::make_bigint(static_cast<int64_t>(matched.size())));
+      }
+    }
+    r.rows.push_back(std::move(out));
+    return r;
   }
   // ORDER BY resolves to either a projected column/alias or an L2_DISTANCE term.  The term
   // may be written inline (ORDER BY L2_DISTANCE(col,'[...]')) or refer to a projected
@@ -920,10 +954,10 @@ Result Engine::execute(const std::string &sql, const std::string &search_mode) {
   Stmt stmt;
   std::string parse_err;
   if (!parse_statement(sql, stmt, parse_err)) {
-    // The task lists NULL, JOIN, aggregates, subqueries, ALTER, DISTINCT and nested
-    // transactions as outside the supported subset, and requires unsupported input to be
-    // answered with the agreed error instead of being given another meaning.  The parser
-    // tags those with an "unsupported:" prefix; anything else really is malformed.
+    // NULL, JOIN, subqueries, DISTINCT and nested transactions are outside the supported
+    // subset, and the task requires unsupported input to be answered with the agreed error
+    // instead of being given another meaning.  The parser tags those with an
+    // "unsupported:" prefix; anything else really is a malformed statement.
     static const char kUnsupported[] = "unsupported:";
     if (parse_err.compare(0, sizeof(kUnsupported) - 1, kUnsupported) == 0) {
       return make_error("unsupported_sql", parse_err.c_str() + sizeof(kUnsupported) - 1);
