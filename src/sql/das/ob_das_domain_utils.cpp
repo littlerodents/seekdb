@@ -43,6 +43,65 @@ ObObjDatumMapType ObFTIndexRowCache::FTS_DOC_WORD_TYPES[] = {OBJ_DATUM_STRING, O
 ObExprOperatorType ObFTIndexRowCache::FTS_INDEX_EXPR_TYPE[] = {T_FUN_SYS_WORD_SEGMENT, T_FUN_SYS_DOC_ID, T_FUN_SYS_WORD_COUNT, T_FUN_SYS_DOC_LENGTH};
 ObExprOperatorType ObFTIndexRowCache::FTS_DOC_WORD_EXPR_TYPE[] = {T_FUN_SYS_DOC_ID, T_FUN_SYS_WORD_SEGMENT, T_FUN_SYS_WORD_COUNT, T_FUN_SYS_DOC_LENGTH};
 
+// doc_word 打包编码（每 doc 一行）：
+//   [0]=0x00 magic, 之后重复 { varint(word_len) + word 字节 + varint(tf) }
+// legacy 行的 word 列是 UTF-8 词，首字节不可能是 0x00 => 两者可无歧义区分。
+static constexpr uint8_t FTDW_PACK_MAGIC = 0x00;
+
+static inline int64_t ftdw_varint_len(uint64_t v)
+{
+  int64_t n = 1;
+  while (v >= 0x80) { v >>= 7; ++n; }
+  return n;
+}
+
+static inline void ftdw_put_varint(char *&p, uint64_t v)
+{
+  while (v >= 0x80) {
+    *p++ = static_cast<char>((v & 0x7F) | 0x80);
+    v >>= 7;
+  }
+  *p++ = static_cast<char>(v);
+}
+
+static inline int ftdw_get_varint(const char *&p, const char *end, uint64_t &v)
+{
+  int ret = OB_SUCCESS;
+  v = 0;
+  int64_t shift = 0;
+  bool done = false;
+  while (OB_SUCC(ret) && !done) {
+    if (p >= end || shift > 63) {
+      ret = OB_INVALID_DATA;
+    } else {
+      const uint8_t byte = static_cast<uint8_t>(*p++);
+      v |= (static_cast<uint64_t>(byte & 0x7F) << shift);
+      shift += 7;
+      done = (0 == (byte & 0x80));
+    }
+  }
+  return ret;
+}
+
+// 打包条目的排序载体。
+// **安全前提（勿改）**：doc_word 的 rowkey 前导列必须是 doc_id（每个 doc 唯一）。
+// 一个 doc 只产生一行打包行，因此 word 分量的 collation（utf8mb4_general_ci：_ci + PAD SPACE）
+// 折叠不会造成 PK 判等冲突。若将来把这个 aux 表的 rowkey 改成单列 word，此前提不再成立。
+struct FtdwEntry
+{
+  const char *ptr_;
+  int32_t len_;
+  int64_t tf_;
+};
+
+// 按 **原始字节** 比较（memcmp 序），不用 collation —— 保证打包串与构建顺序/哈希表迭代顺序无关。
+static inline int ftdw_byte_cmp(const FtdwEntry &a, const FtdwEntry &b)
+{
+  const int32_t n = a.len_ < b.len_ ? a.len_ : b.len_;
+  const int cmp = n > 0 ? memcmp(a.ptr_, b.ptr_, static_cast<size_t>(n)) : 0;
+  return 0 != cmp ? cmp : (a.len_ < b.len_ ? -1 : (a.len_ > b.len_ ? 1 : 0));
+}
+
 ObFTIndexRowCache::ObFTIndexRowCache()
   : rows_(),
     row_idx_(0),
@@ -82,7 +141,8 @@ int ObFTIndexRowCache::init(
 
 int ObFTIndexRowCache::segment(const common::ObObjMeta &ft_obj_meta,
                                const ObDatum &doc_id_datum,
-                               const ObString &fulltext)
+                               const ObString &fulltext,
+                               const int64_t pack_size_limit)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(!is_inited_)) {
@@ -94,7 +154,8 @@ int ObFTIndexRowCache::segment(const common::ObObjMeta &ft_obj_meta,
                                                                    doc_id_datum,
                                                                    fulltext,
                                                                    is_fts_index_aux_,
-                                                                   rows_))) {
+                                                                   rows_,
+                                                                   pack_size_limit))) {
   } else {
     row_idx_ = 0;
   }
@@ -274,13 +335,26 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
   return ret;
 }
 
+// 打包后总字节数：1 magic + sum(varint(word_len) + word_len + varint(tf))
+static inline int64_t ftdw_pack_len(const ObFTWordMap &ft_word_map)
+{
+  int64_t need = 1;
+  for (ObFTWordMap::const_iterator iter = ft_word_map.begin(); iter != ft_word_map.end(); ++iter) {
+    const ObString w = iter->first.get_word().get_string();
+    need += ftdw_varint_len(static_cast<uint64_t>(w.length())) + w.length()
+            + ftdw_varint_len(static_cast<uint64_t>(iter->second));
+  }
+  return need;
+}
+
 /*static*/ int ObDASDomainUtils::generate_fulltext_word_rows(common::ObIAllocator &allocator,
                                                              storage::ObFTParseHelper *helper,
                                                              const common::ObObjMeta &ft_obj_meta,
                                                              const ObDatum &doc_id_datum,
                                                              const ObString &fulltext,
                                                              const bool is_fts_index_aux,
-                                                             ObDomainIndexRow &word_rows)
+                                                             ObDomainIndexRow &word_rows,
+                                                             const int64_t pack_size_limit)
 {
   int ret = OB_SUCCESS;
   static int64_t FT_WORD_DOC_COL_CNT = 4;
@@ -303,6 +377,60 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
                                                  ft_word_map))) {
   } else if (0 == ft_word_map.size()) {
     ret = OB_ITER_END;
+  } else if (!is_fts_index_aux && pack_size_limit > 0 && ftdw_pack_len(ft_word_map) <= pack_size_limit) {
+    // 打包成「每 doc 一行」：word 列放打包串，word_count 列填 0，doc_length 照旧
+    const int64_t need = ftdw_pack_len(ft_word_map);
+    char *pack_buf = nullptr;
+    blocksstable::ObDatumRow *pack_row = nullptr;
+    if (OB_ISNULL(pack_buf = static_cast<char *>(allocator.alloc(need)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else if (OB_ISNULL(rows_buf = reinterpret_cast<char *>(
+                             allocator.alloc(sizeof(blocksstable::ObDatumRow))))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      // 先把 (word, tf) 收集起来并按字节序排序，保证打包结果是同一 doc 的**确定性函数**
+      // （ft_word_map 是哈希表，直接迭代顺序不稳定 -> 会让 aux 表 checksum 逐次不同）。
+      FtdwEntry *ents = static_cast<FtdwEntry *>(allocator.alloc(sizeof(FtdwEntry) * ft_word_map.size()));
+      int64_t ent_cnt = 0;
+      for (ObFTWordMap::const_iterator iter = ft_word_map.begin(); OB_SUCC(ret) && iter != ft_word_map.end(); ++iter) {
+        const ObString w = iter->first.get_word().get_string();
+        ents[ent_cnt].ptr_ = w.ptr();
+        ents[ent_cnt].len_ = w.length();
+        ents[ent_cnt].tf_ = iter->second;
+        ++ent_cnt;
+      }
+      if (OB_ISNULL(ents)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      }
+      for (int64_t i = 1; OB_SUCC(ret) && i < ent_cnt; ++i) {
+        const FtdwEntry key = ents[i];
+        int64_t j = i - 1;
+        while (j >= 0 && ftdw_byte_cmp(ents[j], key) > 0) {
+          ents[j + 1] = ents[j];
+          --j;
+        }
+        ents[j + 1] = key;
+      }
+      char *p = pack_buf;
+      *p++ = static_cast<char>(FTDW_PACK_MAGIC);
+      for (int64_t i = 0; OB_SUCC(ret) && i < ent_cnt; ++i) {
+        ftdw_put_varint(p, static_cast<uint64_t>(ents[i].len_));
+        if (ents[i].len_ > 0) { MEMCPY(p, ents[i].ptr_, ents[i].len_); p += ents[i].len_; }
+        ftdw_put_varint(p, static_cast<uint64_t>(ents[i].tf_));
+      }
+      pack_row = new (rows_buf) blocksstable::ObDatumRow();
+      if (OB_FAIL(pack_row->init(allocator, FT_WORD_DOC_COL_CNT))) {
+      } else {
+        const int64_t word_idx = is_fts_index_aux ? 0 : 1;
+        const int64_t doc_id_idx = is_fts_index_aux ? 1 : 0;
+        pack_row->storage_datums_[word_idx].set_string(ObString(static_cast<int32_t>(p - pack_buf), pack_buf));
+        pack_row->storage_datums_[doc_id_idx].shallow_copy_from_datum(doc_id_datum);
+        pack_row->storage_datums_[2].set_uint(0); // tf 在打包串里
+        pack_row->storage_datums_[3].set_uint(doc_length);
+        if (OB_FAIL(word_rows.push_back(pack_row))) {
+        }
+      }
+    }
   } else if (OB_ISNULL(rows_buf = reinterpret_cast<char *>(
                            allocator.alloc(ft_word_map.size() * sizeof(blocksstable::ObDatumRow))))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
@@ -1033,8 +1161,70 @@ int ObFTDMLIterator::generate_ft_word_rows(const ObChunkDatumStore::StoredRow *s
                                                                    doc_id_datum,
                                                                    ft,
                                                                    is_fts_index_aux,
-                                                                   rows_))) {
+                                                                   rows_,
+                                                                   0 /* 打包仅用于 aux 构建路径 */))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
+    }
+  }
+  return ret;
+}
+
+// 把一行「打包的 doc_word 行」展开成 N 行「目标表(fti_p)布局」的行。
+// 源行布局固定为 doc_word：[0]=doc_id [1]=打包的 word 列 [2]=word_count(0) [3]=doc_length
+static int ftdw_expand_packed_row(common::ObIAllocator &allocator,
+                                  blocksstable::ObDatumRow *src_row,
+                                  const bool is_fts_index_aux,
+                                  ObDomainIndexRow &rows)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(src_row) || OB_UNLIKELY(4 != src_row->count_)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    const ObString packed = src_row->storage_datums_[1].get_string();
+    const char *p = packed.ptr();
+    const char *end = packed.ptr() + packed.length();
+    const int64_t word_idx = is_fts_index_aux ? 0 : 1;
+    const int64_t doc_id_idx = is_fts_index_aux ? 1 : 0;
+    if (OB_UNLIKELY(packed.length() < 1 || FTDW_PACK_MAGIC != static_cast<uint8_t>(*p))) {
+      ret = OB_INVALID_DATA;
+    } else {
+      ++p; // skip magic
+      while (OB_SUCC(ret) && p < end) {
+        uint64_t word_len = 0;
+        uint64_t tf = 0;
+        const char *qp = nullptr;
+        if (OB_FAIL(ftdw_get_varint(p, end, word_len))) {
+        } else if (OB_UNLIKELY(p + word_len > end)) {
+          ret = OB_INVALID_DATA;
+        } else if (FALSE_IT(qp = p + word_len)) {
+        } else if (OB_FAIL(ftdw_get_varint(qp, end, tf))) {
+        } else {
+          void *buf = nullptr;
+          blocksstable::ObDatumRow *row = nullptr;
+          char *word_buf = nullptr;
+          if (OB_ISNULL(buf = allocator.alloc(sizeof(blocksstable::ObDatumRow)))) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+          } else if (OB_ISNULL(word_buf = static_cast<char *>(allocator.alloc(word_len > 0 ? word_len : 1)))) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+          } else {
+            row = new (buf) blocksstable::ObDatumRow();
+            if (word_len > 0) { MEMCPY(word_buf, p, word_len); }
+            // qp 已越过 tf 的变长整数；解码游标必须跳到 qp。旧写法 p += word_len 少跳了
+            // tf 的字节，下一轮会把 tf 当词长，解码立刻错位 -> 解析失败回落 legacy ->
+            // 删除键变成整个打包串 -> check_old_row_legitimacy 找不到旧行 -> 5500。
+            p = qp;
+            if (OB_FAIL(row->init(allocator, 4))) {
+            } else if (OB_FAIL(row->storage_datums_[doc_id_idx].deep_copy(src_row->storage_datums_[0], allocator))) {
+            } else {
+              row->storage_datums_[word_idx].set_string(ObString(static_cast<int32_t>(word_len), word_buf));
+              row->storage_datums_[2].set_uint(static_cast<uint64_t>(tf));
+              row->storage_datums_[3].set_uint(src_row->storage_datums_[3].get_uint64());
+              if (OB_FAIL(rows.push_back(row))) {
+              }
+            }
+          }
+        }
+      }
     }
   }
   return ret;
@@ -1066,9 +1256,41 @@ int ObFTDMLIterator::scan_ft_word_rows(const ObChunkDatumStore::StoredRow *store
         if (OB_FAIL(data_plane::next_ft_doc_word(ft_doc_word_iter_, row))) {
           if (OB_ITER_END != ret) {
           }
-        } else if (OB_FAIL(build_ft_word_row(row, ft_word_row))) {
-        } else if (OB_FAIL(tmp_rows.push_back(ft_word_row))) {
         } else {
+          const ObDatum &word_datum = row->storage_datums_[1];
+          const ObString packed_word = word_datum.get_string();
+          bool expanded = false;
+          // doc_word 表支持两种行编码：打包行（DDL 批量构建时每 doc 一行）与 legacy 行
+          // （每词一行，DML 路径始终写这种）；两种编码在表里并存，读侧两种都认。
+          // 只有写「词->doc 倒排表」时才展开成 N 行（旧倒排行要按 (word, doc) 删）；
+          // 对 doc_word 表本身（!is_fts_index_aux）必须原样返回存储行：它的 rowkey 是
+          // (doc_id, word)，删旧行用的键必须与存储里那行逐字节相同，否则
+          // check_old_row_legitimacy 找不到旧行 -> 5500 (OB_ERR_GENCOL_LEGIT_CHECK_FAILED)。
+          if (is_fts_index_aux && !word_datum.is_null() && packed_word.length() > 0
+              && FTDW_PACK_MAGIC == static_cast<uint8_t>(packed_word.ptr()[0])) {
+            ObDomainIndexRow tmp_expanded;
+            const int tmp_ret = ftdw_expand_packed_row(allocator_, row, is_fts_index_aux, tmp_expanded);
+            if (OB_SUCCESS == tmp_ret) {
+              bool ok = true;
+              for (int64_t k = 0; ok && k < tmp_expanded.count(); ++k) {
+                if (OB_FAIL(tmp_rows.push_back(tmp_expanded.at(k)))) {
+                  ok = false;
+                }
+              }
+              expanded = ok;
+            } else {
+              // 解析失败不等于数据损坏：可能该列带 LOB/行外头，首字节恰为 0x00。
+              // 打包行必然可完整解析，所以这里直接回落到 legacy 语义，绝不报错。
+              LOG_WARN("[FTDW] packed parse failed, fallback to legacy",
+                       K(tmp_ret), K(packed_word.length()),
+                       "first_byte", static_cast<int>(static_cast<uint8_t>(packed_word.ptr()[0])));
+            }
+          }
+          if (OB_SUCC(ret) && !expanded) {
+            if (OB_FAIL(build_ft_word_row(row, ft_word_row))) {
+            } else if (OB_FAIL(tmp_rows.push_back(ft_word_row))) {
+            }
+          }
         }
       } while (OB_SUCC(ret));
 
@@ -1116,13 +1338,22 @@ int ObFTDMLIterator::scan_ft_word_rows(const ObChunkDatumStore::StoredRow *store
                                                                      check_id_datum,
                                                                      ft,
                                                                      is_fts_index_aux,
-                                                                     rows))) {
+                                                                     rows,
+                                                                     0 /* 打包仅用于 aux 构建路径 */))) {
       if (OB_UNLIKELY(OB_ITER_END != ret)) {
       }
     }
     if (OB_ITER_END == ret || OB_SUCC(ret)) {
       ret = OB_SUCCESS;
-      if (OB_UNLIKELY(rows_.count() != rows.count())) {
+      // doc_word(14) 表可能存「1 行 = 整个 doc 的打包行」，而这里的 rows 是按内容重算出来的
+      // N 条 legacy 行；两种表示语义等价，不算不一致（否则 _enable_defensive_check=2 时误报）。
+      bool is_packed_single_row = false;
+      if (1 == rows_.count() && !is_fts_index_aux && OB_NOT_NULL(rows_.at(0))) {
+        const ObString stored_word = rows_.at(0)->storage_datums_[1].get_string();
+        is_packed_single_row = stored_word.length() > 0
+                               && FTDW_PACK_MAGIC == static_cast<uint8_t>(stored_word.ptr()[0]);
+      }
+      if (OB_UNLIKELY(rows_.count() != rows.count() && !is_packed_single_row)) {
         bool need_check_tx_active = true;
         if (OB_NOT_NULL(doc_word_info_) && doc_word_info_->snapshot_.tx_id().is_valid()) {
           const transaction::ObTransID &tx_id = doc_word_info_->snapshot_.tx_id();

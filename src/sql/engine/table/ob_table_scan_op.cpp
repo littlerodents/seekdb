@@ -3717,7 +3717,8 @@ int ObTableScanOp::fetch_next_fts_index_rows()
                                                             ft_expr->datum_meta_,
                                                             ft_expr->obj_meta_.has_lob_header(),
                                                             ft))) {
-      } else if (OB_FAIL(fts_index_.segment(ft_expr->obj_meta_, *doc_id_datum, ft)) &&OB_ITER_END != ret) {
+      } else if (OB_FAIL(fts_index_.segment(ft_expr->obj_meta_, *doc_id_datum, ft,
+                                                          (MY_SPEC.is_fts_ddl_ && !MY_SPEC.is_fts_index_aux_) ? static_cast<int64_t>(ft_expr->max_length_) : 0)) &&OB_ITER_END != ret) {
       } else if (OB_ITER_END == ret) {
         has_segment_word = false;
         ret = OB_SUCCESS;
