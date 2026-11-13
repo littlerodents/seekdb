@@ -134,8 +134,9 @@ bool read_file(const std::string &path, std::string &out, bool &exists) {
 
 }  // namespace
 
-inline uint32_t crc32_of(const void *data, size_t len) {
-  // Standard CRC-32 (IEEE 802.3), table generated on first use.
+// CRC-32 (IEEE 802.3) table, generated on first use.  Kept at namespace scope so the streaming
+// checkpoint writer can accumulate a checksum over bytes it never holds all at once.
+const uint32_t *crc_table() {
   static uint32_t table[256];
   static bool ready = false;
   if (!ready) {
@@ -148,12 +149,22 @@ inline uint32_t crc32_of(const void *data, size_t len) {
     }
     ready = true;
   }
+  return table;
+}
+
+// Feeds one more chunk into a running checksum.  Start with 0xFFFFFFFF and invert the result
+// after the final chunk; that is exactly what crc32_of does in a single call.
+uint32_t crc32_update(uint32_t crc, const void *data, size_t len) {
+  const uint32_t *table = crc_table();
   const unsigned char *p = static_cast<const unsigned char *>(data);
-  uint32_t crc = 0xFFFFFFFFu;
   for (size_t i = 0; i < len; ++i) {
     crc = table[(crc ^ p[i]) & 0xFFu] ^ (crc >> 8);
   }
-  return crc ^ 0xFFFFFFFFu;
+  return crc;
+}
+
+inline uint32_t crc32_of(const void *data, size_t len) {
+  return crc32_update(0xFFFFFFFFu, data, len) ^ 0xFFFFFFFFu;
 }
 
 bool TableSchema::equal_ci(const std::string &a, const std::string &b) {
@@ -477,28 +488,75 @@ bool Storage::replay_redo(std::string &err) {
 }
 
 bool Storage::checkpoint(std::string &err) {
-  std::string body;
-  for (const auto &kv : tables_) {
-    encode_schema(body, kv.second.schema);
-    put_u32(body, static_cast<uint32_t>(kv.second.rows.size()));
-    for (const auto &rk : kv.second.rows) {
-      encode_row(body, rk.second);
-    }
-  }
-  // Layout: magic | table_count | crc(body) | body
-  std::string out;
-  put_u32(out, 0x534E4150u);
-  put_u32(out, static_cast<uint32_t>(tables_.size()));
-  put_u32(out, crc32_of(body.data(), body.size()));
-  out += body;
-
+  // The snapshot is streamed to disk instead of being assembled in memory first: a 1.2M-row
+  // table is hundreds of megabytes, and building the whole image as one string pushed the
+  // process past the 2 GiB cap exactly where the task exercises a dataset larger than the
+  // budget.  The checksum is accumulated over the same bytes as they are written, so the file
+  // layout is unchanged.
   const std::string tmp = snapshot_path_ + ".tmp";
   const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0) {
     err = std::string("cannot create snapshot: ") + std::strerror(errno);
     return false;
   }
-  if (!write_all(fd, out.data(), out.size()) || ::fsync(fd) != 0) {
+
+  std::string head;
+  put_u32(head, 0x534E4150u);
+  put_u32(head, static_cast<uint32_t>(tables_.size()));
+  const off_t crc_off = static_cast<off_t>(head.size());
+  put_u32(head, 0u);  // checksum slot, patched after the body is written
+  if (!write_all(fd, head.data(), head.size())) {
+    ::close(fd);
+    err = "cannot write snapshot header";
+    return false;
+  }
+
+  uint32_t running = 0xFFFFFFFFu;
+  std::string body;
+  bool write_failed = false;
+  for (const auto &kv : tables_) {
+    body.clear();
+    encode_schema(body, kv.second.schema);
+    put_u32(body, static_cast<uint32_t>(kv.second.rows.size()));
+    for (const auto &rk : kv.second.rows) {
+      encode_row(body, rk.second);
+      // Bounded flush: the buffer holds at most a chunk of rows, never the whole table.
+      if (body.size() >= (size_t(1) << 20)) {
+        running = crc32_update(running, body.data(), body.size());
+        if (!write_all(fd, body.data(), body.size())) {
+          write_failed = true;
+          break;
+        }
+        body.clear();
+      }
+    }
+    if (write_failed) {
+      break;
+    }
+    if (!body.empty()) {
+      running = crc32_update(running, body.data(), body.size());
+      if (!write_all(fd, body.data(), body.size())) {
+        write_failed = true;
+        break;
+      }
+      body.clear();
+    }
+  }
+  if (write_failed) {
+    ::close(fd);
+    err = "cannot write snapshot";
+    return false;
+  }
+
+  std::string crc_bytes;
+  put_u32(crc_bytes, running ^ 0xFFFFFFFFu);
+  if (::pwrite(fd, crc_bytes.data(), crc_bytes.size(), crc_off) !=
+      static_cast<ssize_t>(crc_bytes.size())) {
+    ::close(fd);
+    err = "cannot patch snapshot checksum";
+    return false;
+  }
+  if (::fsync(fd) != 0) {
     ::close(fd);
     err = "cannot write snapshot";
     return false;

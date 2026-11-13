@@ -460,6 +460,8 @@ Result Engine::exec_insert(const Stmt &stmt) {
   }
   for (auto &row : prepared) {
     const int64_t pk = row[static_cast<size_t>(t->schema.pk_index)].i;
+    // Validated above, so the row is new: the undo entry records that it must disappear again.
+    note_undo(stmt.table, pk);
     t->rows[pk] = std::move(row);
   }
   Result r;
@@ -468,7 +470,7 @@ Result Engine::exec_insert(const Stmt &stmt) {
   return r;
 }
 
-Result Engine::exec_update(const Stmt &stmt) {
+Result Engine::exec_update(const Stmt &stmt, std::vector<Row> &changed) {
   Table *t = storage_.find_table(stmt.table);
   if (t == nullptr) {
     return make_error("no_such_table", "table does not exist");
@@ -490,8 +492,10 @@ Result Engine::exec_update(const Stmt &stmt) {
     }
     updates.emplace_back(static_cast<size_t>(pos), std::move(v));
   }
-  int64_t affected = 0;
-  for (auto &kv : t->rows) {
+  // Collect every matching row before touching any of them: a WHERE that fails part-way through
+  // must leave the statement with no effect at all, which statement-level atomicity requires.
+  std::vector<int64_t> hits;
+  for (const auto &kv : t->rows) {
     std::string err;
     if (!row_matches(*t, kv.second, stmt.where, err)) {
       if (!err.empty()) {
@@ -499,18 +503,29 @@ Result Engine::exec_update(const Stmt &stmt) {
       }
       continue;
     }
-    for (const auto &u : updates) {
-      kv.second[u.first] = u.second;
+    hits.push_back(kv.first);
+  }
+  for (int64_t pk : hits) {
+    auto it = t->rows.find(pk);
+    if (it == t->rows.end()) {
+      continue;
     }
-    ++affected;
+    note_undo(stmt.table, pk);
+    for (const auto &u : updates) {
+      it->second[u.first] = u.second;
+    }
+    // Report the changed rows directly.  The redo encoder used to take a deep copy of the whole
+    // table and diff against it, which at 1.2M rows allocates hundreds of megabytes per
+    // statement and was what the kernel killed.
+    changed.push_back(it->second);
   }
   Result r;
   r.has_affected_rows = true;
-  r.affected_rows = affected;
+  r.affected_rows = static_cast<int64_t>(hits.size());
   return r;
 }
 
-Result Engine::exec_delete(const Stmt &stmt) {
+Result Engine::exec_delete(const Stmt &stmt, std::vector<int64_t> &removed) {
   Table *t = storage_.find_table(stmt.table);
   if (t == nullptr) {
     return make_error("no_such_table", "table does not exist");
@@ -527,8 +542,12 @@ Result Engine::exec_delete(const Stmt &stmt) {
     doomed.push_back(kv.first);
   }
   for (int64_t pk : doomed) {
+    note_undo(stmt.table, pk);
     t->rows.erase(pk);
   }
+  // The deleted keys are reported straight out, instead of being recovered by diffing a
+  // full-table copy the way the redo encoder used to.
+  removed = doomed;
   Result r;
   r.has_affected_rows = true;
   r.affected_rows = static_cast<int64_t>(doomed.size());
@@ -750,17 +769,40 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
   return r;
 }
 
+void Engine::note_undo(const std::string &table, int64_t pk) {
+  if (!in_tx_) {
+    return;
+  }
+  // Keep only the earliest pre-image of each row: undoing a chain of writes has to restore the
+  // value the row had when the transaction opened, not the value from two statements ago.
+  for (const auto &u : undo_) {
+    if (u.pk == pk && u.table == table) {
+      return;
+    }
+  }
+  UndoEntry entry;
+  entry.table = table;
+  entry.pk = pk;
+  const Table *t = storage_.find_table(table);
+  if (t != nullptr) {
+    auto it = t->rows.find(pk);
+    if (it != t->rows.end()) {
+      entry.existed = true;
+      entry.before = it->second;
+    }
+  }
+  undo_.push_back(std::move(entry));
+}
+
 Result Engine::exec_begin() {
   if (in_tx_) {
     return make_error("transaction_active", "a transaction is already open");
   }
-  tx_snapshot_.clear();
-  for (const auto &name : storage_.table_names()) {
-    const Table *src = storage_.find_table(name);
-    if (src != nullptr) {
-      tx_snapshot_[name] = *src;
-    }
-  }
+  // BEGIN allocates nothing proportional to the database; the undo log fills in as statements
+  // touch rows.  This keeps the memory ceiling independent of table size -- the previous
+  // full-catalogue copy doubled peak memory and was killed at 2 GiB on a 1.2M-row table.
+  undo_.clear();
+  tx_redo_.clear();
   in_tx_ = true;
   dirty_ = false;
   Result r;
@@ -778,14 +820,14 @@ Result Engine::exec_commit() {
     std::string err;
     if (!storage_.append_redo(payload, err)) {
       in_tx_ = false;
-      tx_snapshot_.clear();
+      undo_.clear();
       tx_redo_.clear();
       return make_error("io_error", err.c_str());
     }
   }
   tx_redo_.clear();
+  undo_.clear();
   in_tx_ = false;
-  tx_snapshot_.clear();
   dirty_ = false;
   needs_checkpoint_ = true;
   Result r;
@@ -797,15 +839,19 @@ Result Engine::exec_rollback() {
     Result r;
     return r;
   }
-  // Restore the captured pre-image wholesale.
-  for (const auto &name : storage_.table_names()) {
-    storage_.drop_table(name);
+  // Undo in reverse order so a row written by several statements ends at its original value.
+  for (auto it = undo_.rbegin(); it != undo_.rend(); ++it) {
+    Table *t = storage_.find_table(it->table);
+    if (t == nullptr) {
+      continue;
+    }
+    if (it->existed) {
+      t->rows[it->pk] = it->before;
+    } else {
+      t->rows.erase(it->pk);
+    }
   }
-  for (const auto &kv : tx_snapshot_) {
-    Table copy = kv.second;
-    storage_.put_table(std::move(copy));
-  }
-  tx_snapshot_.clear();
+  undo_.clear();
   tx_redo_.clear();
   in_tx_ = false;
   dirty_ = false;
@@ -883,42 +929,15 @@ Result Engine::execute(const std::string &sql, const std::string &search_mode) {
       return r;
     }
     case Stmt::Kind::UPDATE: {
-      // UPDATE and DELETE rewrite rows, so the redo payload records the resulting rows.
-      std::map<int64_t, Row> before;
-      Table *t = storage_.find_table(stmt.table);
-      if (t != nullptr) {
-        before = t->rows;
-      }
-      Result r = exec_update(stmt);
-      if (r.ok && t != nullptr) {
+      // The statement reports exactly the rows it rewrote, so the redo payload is built without
+      // any full-table copy.
+      std::vector<Row> changed;
+      Result r = exec_update(stmt, changed);
+      if (r.ok) {
         dirty_ = true;
         std::string payload;
         payload.push_back(static_cast<char>(REDO_UPDATE_ROWS));
         put_str(payload, stmt.table);
-        std::vector<Row> changed;
-        for (const auto &kv : t->rows) {
-          auto old = before.find(kv.first);
-          if (old == before.end()) {
-            continue;
-          }
-          bool same = old->second.size() == kv.second.size();
-          for (size_t k = 0; same && k < kv.second.size(); ++k) {
-            const Value &a = old->second[k];
-            const Value &b = kv.second[k];
-            if (a.type != b.type) {
-              same = false;
-            } else if (a.type == ColType::BIGINT) {
-              same = a.i == b.i;
-            } else if (a.type == ColType::VARCHAR) {
-              same = a.s == b.s;
-            } else {
-              same = a.v == b.v;
-            }
-          }
-          if (!same) {
-            changed.push_back(kv.second);
-          }
-        }
         put_u32(payload, static_cast<uint32_t>(changed.size()));
         for (const auto &row : changed) {
           encode_row(payload, row);
@@ -929,23 +948,13 @@ Result Engine::execute(const std::string &sql, const std::string &search_mode) {
       return r;
     }
     case Stmt::Kind::DELETE_ROWS: {
-      std::map<int64_t, Row> before;
-      Table *t = storage_.find_table(stmt.table);
-      if (t != nullptr) {
-        before = t->rows;
-      }
-      Result r = exec_delete(stmt);
-      if (r.ok && t != nullptr) {
+      std::vector<int64_t> removed;
+      Result r = exec_delete(stmt, removed);
+      if (r.ok) {
         dirty_ = true;
         std::string payload;
         payload.push_back(static_cast<char>(REDO_DELETE_ROWS));
         put_str(payload, stmt.table);
-        std::vector<int64_t> removed;
-        for (const auto &kv : before) {
-          if (t->rows.find(kv.first) == t->rows.end()) {
-            removed.push_back(kv.first);
-          }
-        }
         put_u32(payload, static_cast<uint32_t>(removed.size()));
         for (int64_t pk : removed) {
           put_u64(payload, static_cast<uint64_t>(pk));
