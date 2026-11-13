@@ -242,7 +242,9 @@ void ObDDLTaskExecutor::run1()
 ObDDLLocalBuilder::ObDDLLocalBuilder()
   : is_thread_started_(false),
     is_stopped_(true),
-    task_queue_()
+    is_fts_aux_thread_started_(false),
+    task_queue_(),
+    fts_aux_task_queue_()
 {
 
 }
@@ -261,6 +263,7 @@ int ObDDLLocalBuilder::init()
     ret = OB_STATE_NOT_MATCH;
   } else if (OB_FAIL(task_queue_.init(get_thread_cnt_(), 4 << 10, "DdlBuild"))) {
   } else if (OB_FAIL(task_queue_.start())) {
+  } else if (OB_FAIL(init_fts_aux_task_queue_())) {
   } else {
     is_thread_started_ = true;
     is_stopped_ = true;
@@ -270,6 +273,26 @@ int ObDDLLocalBuilder::init()
   }
   FLOG_INFO("[DDL_LOCAL_BUILDER] finish init ddl local builder",
             KR(ret), K(is_thread_started_), K(is_stopped_));
+  return ret;
+}
+
+int ObDDLLocalBuilder::init_fts_aux_task_queue_()
+{
+  int ret = OB_SUCCESS;
+  // In mini mode the shared queue has a single thread, which serializes the
+  // independent auxiliary table builds of one fulltext index.  Give them one
+  // extra slot here instead of widening the shared queue, so that other DDLs
+  // (ordinary index build, vector index build, ...) keep their concurrency.
+  if (lib::is_mini_mode()) {
+    if (OB_FAIL(fts_aux_task_queue_.init(get_fts_aux_thread_cnt_(), 4 << 10, "FtsAuxBld"))) {
+    } else if (OB_FAIL(fts_aux_task_queue_.start())) {
+    } else {
+      is_fts_aux_thread_started_ = true;
+    }
+    if (OB_FAIL(ret)) {
+      fts_aux_task_queue_.destroy();
+    }
+  }
   return ret;
 }
 
@@ -306,6 +329,9 @@ void ObDDLLocalBuilder::server_module_thread_stop()
   if (is_thread_started_) {
     task_queue_.stop();
   }
+  if (is_fts_aux_thread_started_) {
+    fts_aux_task_queue_.stop();
+  }
   FLOG_INFO("[DDL_LOCAL_BUILDER] finish server_module_thread_stop ddl local builder",
             K(is_thread_started_), K(is_stopped_));
 }
@@ -316,6 +342,9 @@ void ObDDLLocalBuilder::server_module_thread_wait()
             K(is_thread_started_), K(is_stopped_));
   if (is_thread_started_) {
     task_queue_.wait();
+  }
+  if (is_fts_aux_thread_started_) {
+    fts_aux_task_queue_.wait();
   }
   FLOG_INFO("[DDL_LOCAL_BUILDER] finish server_module_thread_wait ddl local builder",
             K(is_thread_started_), K(is_stopped_));
@@ -330,6 +359,10 @@ void ObDDLLocalBuilder::destroy()
       is_stopped_ = true;
       task_queue_.destroy();
       is_thread_started_ = false;
+    }
+    if (is_fts_aux_thread_started_) {
+      fts_aux_task_queue_.destroy();
+      is_fts_aux_thread_started_ = false;
     }
   }
   FLOG_INFO("[DDL_LOCAL_BUILDER] finish destroy ddl local builder",
@@ -348,9 +381,32 @@ int ObDDLLocalBuilder::push_task(ObAsyncTask &task)
   return ret;
 }
 
+int ObDDLLocalBuilder::push_fts_aux_task(ObAsyncTask &task)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!is_thread_started_)) {
+    ret = OB_ERR_SYS;
+  } else if (is_stopped_) {
+    ret = OB_STATE_NOT_MATCH;
+  } else if (!is_fts_aux_thread_started_) {
+    // not mini mode: the shared queue already has enough threads
+    ret = task_queue_.push(task);
+  } else if (OB_FAIL(fts_aux_task_queue_.push(task))) {
+  }
+  return ret;
+}
+
 int64_t ObDDLLocalBuilder::get_thread_cnt_() const
 {
   return lib::is_mini_mode() ? 1 : 16;
+}
+
+int64_t ObDDLLocalBuilder::get_fts_aux_thread_cnt_() const
+{
+  // Two slots are enough: the expensive auxiliary builds of one fulltext index
+  // are the domain index aux and the doc word aux, the remaining two finish in
+  // a few hundred milliseconds.
+  return 2;
 }
 
 }  // end namespace share

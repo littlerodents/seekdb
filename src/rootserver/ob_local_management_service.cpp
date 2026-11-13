@@ -347,11 +347,14 @@ void ObLocalManagementService::wait()
   }
 }
 
-int ObLocalManagementService::submit_ddl_local_build_task(ObAsyncTask &task)
+int ObLocalManagementService::submit_ddl_local_build_task(ObAsyncTask &task,
+                                                          const bool is_fts_aux)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
+  } else if (is_fts_aux) {
+    ret = ObSysDDLLocalBuilderUtil::push_fts_aux_task(task);
   } else if (OB_FAIL(ObSysDDLLocalBuilderUtil::push_task(task))) {
   }
   return ret;

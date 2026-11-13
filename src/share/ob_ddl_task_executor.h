@@ -191,12 +191,20 @@ public:
   void server_module_thread_wait();
   void destroy();
   int push_task(ObAsyncTask &task);
+  // The auxiliary tables of one fulltext index are built by independent tasks.
+  // They may use a dedicated extra slot so that two of them can run at the same
+  // time; only used when the shared queue is single threaded (mini mode).
+  int push_fts_aux_task(ObAsyncTask &task);
 
 private:
+  int init_fts_aux_task_queue_();
   int64_t get_thread_cnt_() const;
+  int64_t get_fts_aux_thread_cnt_() const;
   bool is_thread_started_;
   bool is_stopped_;
+  bool is_fts_aux_thread_started_;
   ObAsyncTaskQueue task_queue_;
+  ObAsyncTaskQueue fts_aux_task_queue_;
 };
 
 }  // end namespace share

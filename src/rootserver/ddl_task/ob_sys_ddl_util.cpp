@@ -41,5 +41,23 @@ int ObSysDDLLocalBuilderUtil::push_task(ObAsyncTask &task)
   }
   return ret;
 }
+
+int ObSysDDLLocalBuilderUtil::push_fts_aux_task(ObAsyncTask &task)
+{
+  int ret = OB_SUCCESS;
+  rootserver::ObDDLScheduler *sys_ddl_scheduler =
+      ::oceanbase::share::server_service<::oceanbase::rootserver::ObDDLScheduler>();
+  if (OB_ISNULL(sys_ddl_scheduler)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (!ObDDLServiceLauncher::is_ddl_service_started()) {
+    ret = OB_STATE_NOT_MATCH;
+  } else {
+    SERVER_MODULE_SCOPE {
+      if (OB_FAIL(sys_ddl_scheduler->get_ddl_builder().push_fts_aux_task(task))) {
+      }
+    }
+  }
+  return ret;
+}
 } // end name space rootserver
 } // end namespace oceanbase

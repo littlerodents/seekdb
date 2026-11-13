@@ -272,7 +272,7 @@ public:
       share::schema::ObPartitionLevel exchange_part_level) override;
   int request_time_zone_info(const common::ObRequestTZInfoArg &arg, common::ObRequestTZInfoResult &result);
   // async tasks and callbacks
-  int submit_ddl_local_build_task(share::ObAsyncTask &task);
+  int submit_ddl_local_build_task(share::ObAsyncTask &task, const bool is_fts_aux = false);
   int check_weak_read_version_refresh_interval(int64_t refresh_interval, bool &valid);
   // may modify arg before taking effect
   int set_config_pre_hook(obcall::ObAdminSetConfigArg &arg);
