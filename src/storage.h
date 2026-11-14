@@ -108,6 +108,11 @@ private:
   bool compact_heap(std::string &err);
   // Reads exactly len bytes at offset, growing buf as needed.
   bool read_at(uint64_t offset, uint32_t len, std::string &buf) const;
+  // Points the read path at the current heap file.  Rows are served from a read-only mapping
+  // when one is available: a TopK scan touches every row, and two preads per row made the
+  // benchmark syscall bound (9.9s of system time for 1000 queries over 10k rows).
+  bool map_heap();
+  void unmap_heap();
 
   std::string dir_;
   std::string heap_path_;
@@ -116,6 +121,8 @@ private:
   int heap_fd_ = -1;
   int redo_fd_ = -1;
   uint64_t heap_size_ = 0;   // append position, also the file's logical length
+  const char *heap_map_ = nullptr;  // read-only mapping of heap.dat when it could be created
+  size_t heap_map_len_ = 0;
   std::map<std::string, Table> tables_;
 };
 

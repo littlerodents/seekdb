@@ -497,16 +497,69 @@ bool Storage::save_schema(std::string &err) {
   return true;
 }
 
+void Storage::unmap_heap() {
+  if (heap_map_ != nullptr) {
+    ::munmap(const_cast<char *>(heap_map_), heap_map_len_);
+    heap_map_ = nullptr;
+  }
+  heap_map_len_ = 0;
+}
+
+bool Storage::map_heap() {
+  unmap_heap();
+  if (heap_fd_ < 0) {
+    return false;
+  }
+  struct stat st {};
+  if (::fstat(heap_fd_, &st) != 0 || st.st_size <= 0) {
+    return false;  // empty file: nothing to map yet, the read path retries later
+  }
+  const size_t len = static_cast<size_t>(st.st_size);
+  void *m = ::mmap(nullptr, len, PROT_READ, MAP_PRIVATE, heap_fd_, 0);
+  if (m == MAP_FAILED) {
+    return false;  // fall back to pread; correctness does not depend on the mapping
+  }
+  heap_map_ = static_cast<const char *>(m);
+  heap_map_len_ = len;
+  return true;
+}
+
 bool Storage::get_row_at(const TableSchema &schema, uint64_t offset, Row &out) const {
-  // A record is [pk][len][encoded row]; only len and the payload are needed here.
+  // A record is [pk][len][encoded row].  Decoding straight out of the mapping avoids copying the
+  // record into a temporary string first; a scan used to allocate two buffers per row.
+  const size_t kHeader = sizeof(uint64_t) + sizeof(uint32_t);
+  // A fresh database opens with an empty heap, so the first mapping only becomes possible once
+  // rows exist; create it here on demand rather than only at open time.
+  if (heap_map_ == nullptr) {
+    (void)const_cast<Storage *>(this)->map_heap();
+  }
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    if (heap_map_ != nullptr && offset <= heap_map_len_ &&
+        kHeader <= heap_map_len_ - static_cast<size_t>(offset)) {
+      uint32_t len = 0;
+      std::memcpy(&len, heap_map_ + offset + sizeof(uint64_t), sizeof(len));
+      if (len <= heap_map_len_ - static_cast<size_t>(offset) - kHeader) {
+        const char *p = heap_map_ + offset + kHeader;
+        const char *end = p + len;
+        out.clear();
+        return decode_row(p, end, out, schema.columns.size());
+      }
+      // The record runs past the mapped end because rows were appended since the mapping was
+      // taken; refresh it once and retry before falling back to pread.
+      if (attempt == 0 && const_cast<Storage *>(this)->map_heap()) {
+        continue;
+      }
+    }
+    break;
+  }
   std::string head;
-  if (!read_at(offset, sizeof(uint64_t) + sizeof(uint32_t), head)) {
+  if (!read_at(offset, static_cast<uint32_t>(kHeader), head)) {
     return false;
   }
   uint32_t len = 0;
   std::memcpy(&len, head.data() + sizeof(uint64_t), sizeof(len));
   std::string body;
-  if (!read_at(offset + sizeof(uint64_t) + sizeof(uint32_t), len, body)) {
+  if (!read_at(offset + kHeader, len, body)) {
     return false;
   }
   const char *p = body.data();
@@ -630,6 +683,8 @@ bool Storage::compact_heap(std::string &err) {
     return false;
   }
   heap_size_ = write_pos;
+  // The file was replaced by rename, so any previous mapping refers to the unlinked inode.
+  (void)map_heap();
   return true;
 }
 
