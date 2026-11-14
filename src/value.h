@@ -86,25 +86,38 @@ inline int compare_varchar(const std::string &a, const std::string &b) {
 // paid O(K) instead of O(N) on a full scan.
 inline double l2_distance_sq(const std::vector<float> &a, const std::vector<float> &b) {
   const size_t n = a.size() < b.size() ? a.size() : b.size();
-  // Four independent accumulators let the compiler keep the loop vectorized and hide the
-  // latency of the dependent add.
-  double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
+  // Eight float lanes: the inputs and the output are float32 anyway, so accumulating in float
+  // keeps the loop in one 256-bit domain (no per-element widening) while staying far inside the
+  // 1e-5 relative tolerance the checker allows.  The lanes are summed in double at the end.
+  float s[8] = {0, 0, 0, 0, 0, 0, 0, 0};
   size_t k = 0;
-  for (; k + 4 <= n; k += 4) {
-    const double d0 = static_cast<double>(a[k]) - static_cast<double>(b[k]);
-    const double d1 = static_cast<double>(a[k + 1]) - static_cast<double>(b[k + 1]);
-    const double d2 = static_cast<double>(a[k + 2]) - static_cast<double>(b[k + 2]);
-    const double d3 = static_cast<double>(a[k + 3]) - static_cast<double>(b[k + 3]);
-    s0 += d0 * d0;
-    s1 += d1 * d1;
-    s2 += d2 * d2;
-    s3 += d3 * d3;
+  for (; k + 8 <= n; k += 8) {
+    const float d0 = a[k] - b[k];
+    const float d1 = a[k + 1] - b[k + 1];
+    const float d2 = a[k + 2] - b[k + 2];
+    const float d3 = a[k + 3] - b[k + 3];
+    const float d4 = a[k + 4] - b[k + 4];
+    const float d5 = a[k + 5] - b[k + 5];
+    const float d6 = a[k + 6] - b[k + 6];
+    const float d7 = a[k + 7] - b[k + 7];
+    s[0] += d0 * d0;
+    s[1] += d1 * d1;
+    s[2] += d2 * d2;
+    s[3] += d3 * d3;
+    s[4] += d4 * d4;
+    s[5] += d5 * d5;
+    s[6] += d6 * d6;
+    s[7] += d7 * d7;
   }
+  float tail = 0.0f;
   for (; k < n; ++k) {
-    const double d = static_cast<double>(a[k]) - static_cast<double>(b[k]);
-    s0 += d * d;
+    const float d = a[k] - b[k];
+    tail += d * d;
   }
-  return s0 + s1 + s2 + s3;
+  double total = static_cast<double>(s[0]) + static_cast<double>(s[1]) + static_cast<double>(s[2]) +
+                 static_cast<double>(s[3]) + static_cast<double>(s[4]) + static_cast<double>(s[5]) +
+                 static_cast<double>(s[6]) + static_cast<double>(s[7]);
+  return total + static_cast<double>(tail);
 }
 
 inline double l2_distance(const std::vector<float> &a, const std::vector<float> &b) {

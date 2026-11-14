@@ -41,6 +41,9 @@ private:
   Result exec_insert(const Stmt &stmt);
   // Reorders INSERT rows from an explicit column list into table-definition order.
   bool normalize_insert_columns(Stmt &stmt, std::string &err);
+  // Builds (or reuses) the decoded-row cache for a table; false means the table is too large to
+  // cache and the caller must stream.
+  bool ensure_scan_cache(const Table *t);
   Result exec_select(const Stmt &stmt, const std::string &search_mode);
   Result exec_update(const Stmt &stmt, std::vector<Row> &changed);
   Result exec_delete(const Stmt &stmt, std::vector<int64_t> &removed);

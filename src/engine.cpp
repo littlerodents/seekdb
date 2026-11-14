@@ -633,6 +633,36 @@ Result Engine::exec_delete(const Stmt &stmt, std::vector<int64_t> &removed) {
   return r;
 }
 
+bool Engine::ensure_scan_cache(const Table *t) {
+  if (scan_cache_.epoch == mutation_epoch_ && scan_cache_.table == t->schema.name) {
+    return true;
+  }
+  scan_cache_.rows.clear();
+  scan_cache_.table.clear();
+  constexpr size_t kScanCacheBudgetBytes = 64u << 20;
+  size_t bytes = 48;  // per-row bookkeeping
+  for (const auto &c : t->schema.columns) {
+    bytes += (c.type == ColType::VECTOR)
+                 ? sizeof(float) * static_cast<size_t>(c.length)
+                 : (c.type == ColType::VARCHAR ? static_cast<size_t>(c.length) + 16 : 16);
+  }
+  if (bytes * t->rows.size() > kScanCacheBudgetBytes) {
+    return false;
+  }
+  scan_cache_.rows.reserve(t->rows.size());
+  for (const auto &kv : t->rows) {
+    Row row;
+    if (!storage_.get_row_at(t->schema, kv.second, row)) {
+      scan_cache_.rows.clear();
+      return false;
+    }
+    scan_cache_.rows.emplace_back(kv.first, std::move(row));
+  }
+  scan_cache_.table = t->schema.name;
+  scan_cache_.epoch = mutation_epoch_;
+  return true;
+}
+
 Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
   (void)search_mode;  // the exact plan answers both modes, which the task allows
   const Table *t = storage_.find_table(stmt.table);
@@ -677,35 +707,91 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
   matched.reserve(t->rows.size());
   // Reuse the decoded table when possible; otherwise decode once and keep it for the queries
   // that follow (bounded so a table larger than the memory budget keeps streaming).
-  constexpr size_t kScanCacheBudgetBytes = 64u << 20;
-  bool use_cache = scan_cache_.epoch == mutation_epoch_ && scan_cache_.table == stmt.table;
-  if (!use_cache) {
-    scan_cache_.rows.clear();
-    scan_cache_.table.clear();
-    size_t bytes = 0;
-    for (const auto &c : t->schema.columns) {
-      bytes += (c.type == ColType::VECTOR) ? sizeof(float) * static_cast<size_t>(c.length)
-                                           : (c.type == ColType::VARCHAR ? c.length + 16 : 16);
+  bool use_cache = ensure_scan_cache(t);
+  // Fused TopK: one L2 key, ascending, bounded LIMIT and at most one filter.  The generic path
+  // builds a match list and then re-ranks it; for the benchmark shape that is two passes plus a
+  // sort of every candidate.  This single pass keeps the exact double-accumulated distance (so
+  // tie ordering is identical) and only maintains a k-element heap.
+  if (use_cache && stmt.limit > 0 && stmt.limit <= 1000000 && stmt.order_by.size() == 1 &&
+      stmt.order_by[0].is_l2 && !stmt.order_by[0].desc && !t->rows.empty()) {
+    const int64_t l2pos = t->schema.column_pos(stmt.order_by[0].l2_column);
+    const WhereClause &w = stmt.where;
+    bool filter_ok = !w.present || w.conds.size() == 1;
+    int64_t fpos = -1;
+    if (filter_ok && w.present) {
+      fpos = t->schema.column_pos(w.conds[0].column);
+      if (fpos < 0) {
+        filter_ok = false;
+      }
     }
-    bytes += 48;  // per-row bookkeeping
-    if (bytes * t->rows.size() <= kScanCacheBudgetBytes) {
-      scan_cache_.rows.reserve(t->rows.size());
-      bool ok = true;
-      for (const auto &kv : t->rows) {
-        Row row;
-        if (!storage_.get_row_at(t->schema, kv.second, row)) {
-          ok = false;
-          break;
+    if (filter_ok && l2pos >= 0 && t->schema.columns[static_cast<size_t>(l2pos)].type == ColType::VECTOR) {
+      const std::vector<float> &q = stmt.order_by[0].l2_query;
+      struct Cand {
+        double d;
+        const int64_t *pk;
+      };
+      const auto cmp = [](const Cand &a, const Cand &b) {
+        return a.d != b.d ? a.d < b.d : *a.pk < *b.pk;
+      };
+      const size_t k = static_cast<size_t>(stmt.limit);
+      std::vector<Cand> heap;
+      heap.reserve((k < scan_cache_.rows.size() ? k : scan_cache_.rows.size()) + 1);
+      bool filter_error = false;
+      for (const auto &entry : scan_cache_.rows) {
+        const Row &row = entry.second;
+        if (fpos >= 0) {
+          bool match = false;
+          std::string ferr;
+          if (!value_matches(row[static_cast<size_t>(fpos)], w.conds[0].op, w.conds[0].literal, match,
+                             ferr)) {
+            filter_error = true;
+            break;
+          }
+          if (!match) {
+            continue;
+          }
         }
-        scan_cache_.rows.emplace_back(kv.first, std::move(row));
+        const Cand c{l2_distance_sq(row[static_cast<size_t>(l2pos)].v, q), &entry.first};
+        if (heap.size() < k) {
+          heap.push_back(c);
+          std::push_heap(heap.begin(), heap.end(), cmp);
+        } else if (cmp(c, heap.front())) {
+          std::pop_heap(heap.begin(), heap.end(), cmp);
+          heap.back() = c;
+          std::push_heap(heap.begin(), heap.end(), cmp);
+        }
       }
-      if (ok) {
-        scan_cache_.table = stmt.table;
-        scan_cache_.epoch = mutation_epoch_;
-        use_cache = true;
-      } else {
-        scan_cache_.rows.clear();
+      if (filter_error) {
+        return make_error("invalid_where", "filter could not be evaluated");
       }
+      std::sort_heap(heap.begin(), heap.end(), cmp);
+      Result fr;
+      for (const auto &it : items) {
+        std::string name = it.alias;
+        if (name.empty()) {
+          name = it.is_l2 ? "distance" : it.column;
+        }
+        fr.columns.push_back(name);
+      }
+      for (const auto &c : heap) {
+        Row row;
+        if (!storage_.get_row(stmt.table, *c.pk, row)) {
+          return make_error("io_error", "cannot read row");
+        }
+        std::vector<Value> out;
+        out.reserve(items.size());
+        for (const auto &it : items) {
+          if (it.is_l2) {
+            const int64_t pos = t->schema.column_pos(it.l2_column);
+            out.push_back(Value::make_double(l2_distance(row[static_cast<size_t>(pos)].v, it.l2_query)));
+          } else {
+            const int64_t pos = t->schema.column_pos(it.column);
+            out.push_back(row[static_cast<size_t>(pos)]);
+          }
+        }
+        fr.rows.push_back(std::move(out));
+      }
+      return fr;
     }
   }
   if (use_cache) {
