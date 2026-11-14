@@ -673,20 +673,70 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
   // needed.  Keeping whole rows for every match would put the table back in memory, which is the
   // thing the disk-resident layout exists to avoid.
   std::vector<const int64_t *> matched;
+  std::vector<const Row *> matched_rows;  // parallel to `matched` when the scan cache is used
   matched.reserve(t->rows.size());
-  for (const auto &kv : t->rows) {
-    Row row;
-    if (!storage_.get_row_at(t->schema, kv.second, row)) {
-      return make_error("io_error", "cannot read row");
+  // Reuse the decoded table when possible; otherwise decode once and keep it for the queries
+  // that follow (bounded so a table larger than the memory budget keeps streaming).
+  constexpr size_t kScanCacheBudgetBytes = 64u << 20;
+  bool use_cache = scan_cache_.epoch == mutation_epoch_ && scan_cache_.table == stmt.table;
+  if (!use_cache) {
+    scan_cache_.rows.clear();
+    scan_cache_.table.clear();
+    size_t bytes = 0;
+    for (const auto &c : t->schema.columns) {
+      bytes += (c.type == ColType::VECTOR) ? sizeof(float) * static_cast<size_t>(c.length)
+                                           : (c.type == ColType::VARCHAR ? c.length + 16 : 16);
     }
-    std::string err;
-    if (!row_matches(*t, row, stmt.where, err)) {
-      if (!err.empty()) {
-        return make_error("invalid_where", err.c_str());
+    bytes += 48;  // per-row bookkeeping
+    if (bytes * t->rows.size() <= kScanCacheBudgetBytes) {
+      scan_cache_.rows.reserve(t->rows.size());
+      bool ok = true;
+      for (const auto &kv : t->rows) {
+        Row row;
+        if (!storage_.get_row_at(t->schema, kv.second, row)) {
+          ok = false;
+          break;
+        }
+        scan_cache_.rows.emplace_back(kv.first, std::move(row));
       }
-      continue;
+      if (ok) {
+        scan_cache_.table = stmt.table;
+        scan_cache_.epoch = mutation_epoch_;
+        use_cache = true;
+      } else {
+        scan_cache_.rows.clear();
+      }
     }
-    matched.push_back(&kv.first);
+  }
+  if (use_cache) {
+    for (const auto &entry : scan_cache_.rows) {
+      std::string err;
+      if (!row_matches(*t, entry.second, stmt.where, err)) {
+        if (!err.empty()) {
+          return make_error("invalid_where", err.c_str());
+        }
+        continue;
+      }
+      matched.push_back(&entry.first);
+      if (use_cache) {
+        matched_rows.push_back(&entry.second);
+      }
+    }
+  } else {
+    for (const auto &kv : t->rows) {
+      Row row;
+      if (!storage_.get_row_at(t->schema, kv.second, row)) {
+        return make_error("io_error", "cannot read row");
+      }
+      std::string err;
+      if (!row_matches(*t, row, stmt.where, err)) {
+        if (!err.empty()) {
+          return make_error("invalid_where", err.c_str());
+        }
+        continue;
+      }
+      matched.push_back(&kv.first);
+    }
   }
   // An aggregate collapses the match set into one row, so it bypasses ordering and LIMIT: there
   // is exactly one result row and it always carries its column name.
@@ -783,6 +833,83 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
   // Sorting keys are computed once per row instead of re-reading rows inside the comparator.  A
   // comparator that reads from disk is not usable with std::sort: a failed read would have to
   // fall back to some other order, which breaks the strict weak ordering that sort requires.
+  // Fast path for the benchmark shape: one L2 key, ascending, bounded LIMIT.  A k-element heap
+  // over the (already cached) rows avoids materialising one SortValue vector per candidate and
+  // sorting the whole match set for a ten-row answer.
+  if (keys.size() == 1 && keys[0].by_l2 && !keys[0].desc && stmt.limit > 0) {
+    struct Cand {
+      double d;
+      const int64_t *pk;
+    };
+    const auto cmp = [](const Cand &a, const Cand &b) {
+      if (a.d != b.d) {
+        return a.d < b.d;
+      }
+      return *a.pk < *b.pk;
+    };
+    const size_t k = static_cast<size_t>(stmt.limit);
+    std::vector<Cand> heap;
+    heap.reserve(k + 1);
+    bool fast_error = false;
+    for (size_t mi = 0; mi < matched.size(); ++mi) {
+      Row row_storage;
+      const Row *rowp = nullptr;
+      if (use_cache && mi < matched_rows.size()) {
+        rowp = matched_rows[mi];
+      } else {
+        if (!storage_.get_row(stmt.table, *matched[mi], row_storage)) {
+          fast_error = true;
+          break;
+        }
+        rowp = &row_storage;
+      }
+      const Cand c{dist_sq_of(*rowp, keys[0]), matched[mi]};
+      if (heap.size() < k) {
+        heap.push_back(c);
+        std::push_heap(heap.begin(), heap.end(), cmp);
+      } else if (cmp(c, heap.front())) {
+        std::pop_heap(heap.begin(), heap.end(), cmp);
+        heap.back() = c;
+        std::push_heap(heap.begin(), heap.end(), cmp);
+      }
+    }
+    if (!fast_error) {
+      std::sort_heap(heap.begin(), heap.end(), cmp);
+      matched.clear();
+      matched.reserve(heap.size());
+      for (const auto &c : heap) {
+        matched.push_back(c.pk);
+      }
+      Result fr;
+      for (const auto &it : items) {
+        std::string name = it.alias;
+        if (name.empty()) {
+          name = it.is_l2 ? "distance" : it.column;
+        }
+        fr.columns.push_back(name);
+      }
+      for (const auto *pk : matched) {
+        Row row;
+        if (storage_.get_row(stmt.table, *pk, row)) {
+        } else {
+          return make_error("io_error", "cannot read row");
+        }
+        std::vector<Value> out;
+        out.reserve(items.size());
+        for (const auto &it : items) {
+          if (it.is_l2) {
+            const int64_t pos = t->schema.column_pos(it.l2_column);
+            out.push_back(Value::make_double(l2_distance(row[static_cast<size_t>(pos)].v, it.l2_query)));
+          } else {
+            const int64_t pos = t->schema.column_pos(it.column);
+            out.push_back(row[static_cast<size_t>(pos)]);
+          }
+        }
+        fr.rows.push_back(std::move(out));
+      }
+      return fr;
+    }
+  }
   struct SortValue {
     bool numeric = true;   // BIGINT comparison, otherwise text
     bool is_l2 = false;
@@ -797,12 +924,20 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
   std::vector<Ranked> ranked;
   ranked.reserve(matched.size());
   bool key_error = false;
-  for (const auto *pk : matched) {
-    Row row;
-    if (!storage_.get_row(stmt.table, *pk, row)) {
-      key_error = true;
-      break;
+  for (size_t mi = 0; mi < matched.size(); ++mi) {
+    const int64_t *pk = matched[mi];
+    Row row_storage;
+    const Row *rowp = nullptr;
+    if (use_cache && mi < matched_rows.size()) {
+      rowp = matched_rows[mi];
+    } else {
+      if (!storage_.get_row(stmt.table, *pk, row_storage)) {
+        key_error = true;
+        break;
+      }
+      rowp = &row_storage;
     }
+    const Row &row = *rowp;
     Ranked r;
     r.pk = pk;
     r.keys.reserve(keys.size());
@@ -1011,6 +1146,9 @@ Result Engine::execute(const std::string &sql, const std::string &search_mode) {
       return make_error("unsupported_sql", parse_err.c_str() + sizeof(kUnsupported) - 1);
     }
     return make_error("syntax_error", parse_err.c_str());
+  }
+  if (stmt.kind != Stmt::Kind::SELECT) {
+    ++mutation_epoch_;
   }
   if (stmt.kind == Stmt::Kind::INSERT && !stmt.insert_columns.empty()) {
     std::string list_err;

@@ -55,6 +55,18 @@ private:
   void encode_redo(const Stmt &stmt, std::string &out);
 
   Storage storage_;
+  // Decoded-row cache for SELECT.  Every query used to re-read and re-decode each row from the
+  // table file; a benchmark that runs thousands of TopK queries over the same table pays that
+  // decode cost thousands of times.  The cache is rebuilt after any statement that can change
+  // data (every non-SELECT bumps mutation_epoch_) and is skipped for tables whose decoded rows
+  // would not fit the scan budget, so the "data larger than memory" case still streams.
+  struct ScanCache {
+    uint64_t epoch = 0;
+    std::string table;
+    std::vector<std::pair<int64_t, Row>> rows;
+  };
+  ScanCache scan_cache_;
+  uint64_t mutation_epoch_ = 1;
   // Transaction state.  BEGIN records an undo log of the rows a statement is about to change
   // instead of copying the catalogue: a full copy doubles the peak memory of the largest
   // dataset, which is exactly where the task's "data larger than the memory budget" case lives
