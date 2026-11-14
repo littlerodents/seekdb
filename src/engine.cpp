@@ -438,6 +438,54 @@ Result Engine::exec_create_index(const Stmt &stmt) {
   return r;
 }
 
+// The task's INSERT may name columns in any order.  Everything downstream (coercion, redo
+// payload, duplicate-key detection) assumes table-definition order, so the rows are permuted
+// once here instead of teaching each consumer about the column list.
+bool Engine::normalize_insert_columns(Stmt &stmt, std::string &err) {
+  const Table *t = storage_.find_table(stmt.table);
+  if (t == nullptr) {
+    return true;  // exec_insert reports no_such_table
+  }
+  const size_t ncol = t->schema.columns.size();
+  if (stmt.insert_columns.size() != ncol) {
+    err = "all columns must be provided";
+    return false;
+  }
+  std::vector<size_t> source(ncol, ncol);  // table column -> position in the value list
+  for (size_t k = 0; k < stmt.insert_columns.size(); ++k) {
+    const std::string &name = stmt.insert_columns[k];
+    size_t target = ncol;
+    for (size_t j = 0; j < ncol; ++j) {
+      if (TableSchema::equal_ci(t->schema.columns[j].name, name)) {
+        target = j;
+        break;
+      }
+    }
+    if (target == ncol) {
+      err = "unknown column: " + name;
+      return false;
+    }
+    if (source[target] != ncol) {
+      err = "duplicate column: " + name;
+      return false;
+    }
+    source[target] = k;
+  }
+  for (auto &row : stmt.rows) {
+    if (row.size() != ncol) {
+      err = "value count does not match the column list";
+      return false;
+    }
+    std::vector<Value> ordered(ncol);
+    for (size_t j = 0; j < ncol; ++j) {
+      ordered[j] = std::move(row[source[j]]);
+    }
+    row = std::move(ordered);
+  }
+  stmt.insert_columns.clear();
+  return true;
+}
+
 Result Engine::exec_insert(const Stmt &stmt) {
   Table *t = storage_.find_table(stmt.table);
   if (t == nullptr) {
@@ -963,6 +1011,12 @@ Result Engine::execute(const std::string &sql, const std::string &search_mode) {
       return make_error("unsupported_sql", parse_err.c_str() + sizeof(kUnsupported) - 1);
     }
     return make_error("syntax_error", parse_err.c_str());
+  }
+  if (stmt.kind == Stmt::Kind::INSERT && !stmt.insert_columns.empty()) {
+    std::string list_err;
+    if (!normalize_insert_columns(stmt, list_err)) {
+      return make_error("invalid_column", list_err.c_str());
+    }
   }
   switch (stmt.kind) {
     case Stmt::Kind::UNSUPPORTED:

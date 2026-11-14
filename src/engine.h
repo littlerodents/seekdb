@@ -39,6 +39,8 @@ private:
   Result exec_create_table(const Stmt &stmt);
   Result exec_create_index(const Stmt &stmt);
   Result exec_insert(const Stmt &stmt);
+  // Reorders INSERT rows from an explicit column list into table-definition order.
+  bool normalize_insert_columns(Stmt &stmt, std::string &err);
   Result exec_select(const Stmt &stmt, const std::string &search_mode);
   Result exec_update(const Stmt &stmt, std::vector<Row> &changed);
   Result exec_delete(const Stmt &stmt, std::vector<int64_t> &removed);

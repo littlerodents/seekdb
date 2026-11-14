@@ -198,6 +198,10 @@ struct Stmt {
 
   // INSERT
   std::vector<std::vector<Value>> rows;
+  // Optional explicit column list (INSERT INTO t (b, a) VALUES ...).  Empty means the values
+  // follow the table definition order, which is what a plain INSERT INTO t VALUES (...)
+  // promises.
+  std::vector<std::string> insert_columns;
 
   // SELECT
   std::vector<SelectItem> select_items;
