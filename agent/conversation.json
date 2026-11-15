@@ -116,6 +116,18 @@
    "source": "this_session",
    "role": "agent",
    "content": "修正列清单后，公开 20/20，98 条差分在 1e-6 容差内一致。提测 a04ce5d4 的 MySQL 正式用例返回 s/f = 1/0，准入通过。"
+  },
+  {
+   "id": "u14",
+   "source": "this_session",
+   "role": "user",
+   "content": "那现在我要做出成绩，我应该怎么办？"
+  },
+  {
+   "id": "u15",
+   "source": "this_session",
+   "role": "user",
+   "content": "我觉得你现在要想办法先做到拿分门槛"
   }
  ],
  "experiments": [
@@ -169,47 +181,77 @@
    "user_prompt_refs": [
     {
      "id": "u05",
-     "quote": "我觉得问题是什么？你一直是在用一些低效的努力，用战术的勤勉来掩盖战略的懒惰啊",
-     "json_pointer": "/conversations/4/content"
+     "json_pointer": "/conversations/4/content",
+     "quote": "我觉得问题是什么？你一直是在用一些低效的努力，用战术的勤勉来掩盖战略的懒惰啊"
     },
     {
      "id": "u07",
-     "quote": "你去看对应的解决方案，再跟我回答这四个问题，然后让我评判，岂不是会更好？",
-     "json_pointer": "/conversations/6/content"
+     "json_pointer": "/conversations/6/content",
+     "quote": "你去看对应的解决方案，再跟我回答这四个问题，然后让我评判，岂不是会更好？"
     }
    ],
-   "result": "差分第一条就定位到 INSERT 列清单不支持；修正后公开 20/20、130 条差分零内容差异，提测 a04ce5d4 准入 s/f=1/0（e02/e03/e04）。",
-   "boundary": "学生诊断的是'用提测代替诊断'的方法论问题，并提出了先找现成方案的要求；差分实验、根因定位与代码修复均为 Agent 完成。学生没有亲自解释列清单与失败用例的因果关系。",
+   "result": "学生否定'继续改版本再提测'的路线后，Agent 改为找一个已通过准入的实现做差分；第一条差异即定位到 INSERT 列清单不支持（e02）。修正后公开 20/20、98 条差分零内容差异（e03），提测 a04ce5d4 的 MySQL 正式用例 s/f=1/0，准入通过（e04）。",
+   "boundary": "学生诊断的是方法论（用提测代替诊断），并提出了先找现成方案的要求；差分实验、根因定位与代码修复由 Agent 完成。学生没有亲自解释列清单与失败用例的因果关系。",
    "evidence_refs": [
     {
      "id": "e02",
-     "quote": "唯一内容级差异：INSERT INTO u (s, id) VALUES ('xy', 2), ('abc', 1) 我们返回",
-     "json_pointer": "/experiments/1/output"
+     "json_pointer": "/experiments/1/output",
+     "quote": "唯一内容级差异：INSERT INTO u (s, id) VALUES ('xy', 2), ('abc', 1) 我们返回"
     },
     {
      "id": "e04",
-     "quote": "MySQL 正式用例：successCount=1, failCount=0",
-     "json_pointer": "/experiments/3/output"
+     "json_pointer": "/experiments/3/output",
+     "quote": "MySQL 正式用例：successCount=1, failCount=0"
+    }
+   ]
+  },
+  {
+   "id": "case_research_first",
+   "title": "先看现成方案再答题：参考实现同时解决了工程与材料两个问题",
+   "user_prompt_refs": [
+    {
+     "id": "u07",
+     "json_pointer": "/conversations/6/content",
+     "quote": "因为我觉得你现在解决的问题，一定都是一些经典问题的变种。"
+    },
+    {
+     "id": "u07b",
+     "json_pointer": "/conversations/6/content",
+     "quote": "他既然出这个题，一定是有对应的解决方案的。"
+    }
+   ],
+   "result": "学生判断这是经典问题的变种、要求先找现成方案后，Agent 找到并通过准入的参考实现（正式分 1630.67）：其源码被编译成差分预言机并直接定位了准入失败点（e02），其 78KB 的 conversation.json 结构成为本材料的组织依据。",
+   "boundary": "研究、编译与结论都由 Agent 完成；学生提出的是方法（先找现成方案）和一个判断（这些是经典问题的变种）。学生没有参与解读参考实现的设计。",
+   "evidence_refs": [
+    {
+     "id": "e02",
+     "json_pointer": "/experiments/1/output",
+     "quote": "58 条第一批 + 40 条第二批 + 32 条事务边界。"
     }
    ]
   },
   {
    "id": "case_perf",
-   "title": "查询性能三次改动：从 130 qps 到 2530 qps",
+   "title": "查询性能三次改动：从 130 qps 到 2530 qps，并回到排名口径",
    "user_prompt_refs": [
     {
      "id": "u08",
-     "quote": "完全支持你，你可以先试一轮，试完之后我们再来回答这个问题？",
-     "json_pointer": "/conversations/7/content"
+     "json_pointer": "/conversations/7/content",
+     "quote": "完全支持你，你可以先试一轮，试完之后我们再来回答这个问题？"
+    },
+    {
+     "id": "u15",
+     "json_pointer": "/conversations/17/content",
+     "quote": "我觉得你现在要想办法先做到拿分门槛"
     }
    ],
-   "result": "缓存解码行 7.72→1.03s，排序复用缓存行 1.03→0.40s，单遍融合 + float 车道后 0.40s（2530 qps），峰值内存 11MB（e05）。",
-   "boundary": "三轮改动的设计与实现全部由 Agent 完成；学生的贡献是批准这一轮实验并设定'先试一轮再回答'的顺序。",
+   "result": "学生批准'先做一轮实验再讨论'后，Agent 三轮改动把查询从 7.72 s 降到 0.40 s（130→2530 qps，e05）；随后按学生'先做到拿分门槛'的要求，用平台榜单算出性能榜第 80 名需要 E≈3978、Prompt 榜第 80 名需要原始分≈6.5（scoring_context），把目标从'优化'改成'过线'。",
+   "boundary": "三轮优化的设计与实现全部由 Agent 完成；学生的作用是批准实验顺序，并在结果出来后把目标收敛到'拿分门槛'。学生没有亲自解释性能机制。",
    "evidence_refs": [
     {
      "id": "e05",
-     "quote": "我们修前：0.55s / 7.72s（130 qps）/ 9MB；行缓存后 1.03s（966 qps）；单遍融合 + float 车道后 0.40s（2530 qps）/ 11MB。",
-     "json_pointer": "/experiments/4/output"
+     "json_pointer": "/experiments/4/output",
+     "quote": "我们修前：0.55s / 7.72s（130 qps）/ 9MB；行缓存后 1.03s（966 qps）；单遍融合 + float 车道后 0.40s（2530 qps）/ 11MB。"
     }
    ]
   },
@@ -219,33 +261,32 @@
    "user_prompt_refs": [
     {
      "id": "u12",
-     "quote": "你确定吗？",
-     "json_pointer": "/conversations/11/content"
+     "json_pointer": "/conversations/11/content",
+     "quote": "你确定吗？"
     }
    ],
-   "result": "Agent 原结论'没有可用的 GPU 模板'被推翻：按学生给的部署手册复查后，发现队列里已有一台 one-click 实例、镜像就是大赛的 amd-oneclick-base；同时也查出 Radeon Cloud 余额为 0，充值后实例启动。后续又发现该镜像缺 /opt/hipvs，无法验证 CAGRA，最终销毁止损，剩余 18 积分。",
+   "result": "Agent 原结论'没有可用的 GPU 模板'被推翻：按学生给的部署手册复查后，发现队列里已有一台 one-click 实例、镜像就是大赛的 amd-oneclick-base；同时查出 Radeon Cloud 余额为 0，充值后实例启动；随后发现该镜像缺 /opt/hipvs，无法验证 CAGRA，最终销毁止损（剩余 18 积分）。",
    "boundary": "这是一次结论纠正，不是得分改进；AMD 题本身没有推进。学生的质疑只提供了线索（手册链接），复查与操作由 Agent 完成。",
    "evidence_refs": []
   },
   {
-   "id": "case_research_first",
-   "title": "先看现成方案再答题：参考实现同时解决了工程与材料两个问题",
+   "id": "case_threshold",
+   "title": "从'做出成绩'到'先过拿分门槛'：用榜单反推目标",
    "user_prompt_refs": [
     {
-     "id": "u07",
-     "quote": "因为我觉得你现在解决的问题，一定都是一些经典问题的变种。",
-     "json_pointer": "/conversations/6/content"
+     "id": "u14",
+     "json_pointer": "/conversations/16/content",
+     "quote": "那现在我要做出成绩，我应该怎么办？"
+    },
+    {
+     "id": "u15",
+     "json_pointer": "/conversations/17/content",
+     "quote": "我觉得你现在要想办法先做到拿分门槛"
     }
    ],
-   "result": "找到并通过准入的参考实现（AtoFuture，正式分 1630.67）。其源码被编译成差分预言机（e02），其 78KB 的 conversation.json 结构被用作本材料的组织依据。",
-   "boundary": "研究、编译与结论都由 Agent 完成；学生提出的是方法（先找现成方案）和一个判断（这些是经典问题的变种）。",
-   "evidence_refs": [
-    {
-     "id": "e02",
-     "quote": "58 条第一批 + 40 条第二批 + 32 条事务边界。",
-     "json_pointer": "/experiments/1/output"
-    }
-   ]
+   "result": "按学生要求，Agent 查了加赛榜：性能榜 231 队有效、第 1 名 5586、第 80 名 3978；Prompt 榜 165 队、第 1 名 67、第 80 名 6.5；每名 0.5 分。结论写进 scoring_context：当前两项都是 0，必须先让性能变有效或让 Prompt 原始分过 6.5。",
+   "boundary": "榜单数据与换算由 Agent 完成；学生提出的是目标（做出成绩）和约束（先过门槛），没有给出具体路径。",
+   "evidence_refs": []
   }
  ],
  "student_contribution_index": {
@@ -253,43 +294,59 @@
   "entries": [
    {
     "id": "S1",
+    "json_pointer": "/conversations/4/content",
     "quote": "我觉得问题是什么？你一直是在用一些低效的努力，用战术的勤勉来掩盖战略的懒惰啊",
-    "observation": "学生在看到连续四次'同一类失败'之后，没有继续要求改代码，而是指出方法问题：用提测次数代替诊断。",
+    "observation": "连续四次同类失败后，学生停止要求改代码，指出方法问题：用提测次数代替诊断。",
     "dimension_hint": "独立验证与质疑",
-    "tier_hint": "1.0：学生提出具体问题并有后续实际结果（差分定位到列清单、准入通过），但因果关系与技术解释由 Agent 给出。",
-    "json_pointer": "/conversations/4/content"
+    "tier_hint": "1.0~1.5：问题具体且后续有实际结果（差分定位、准入通过）；技术解释由 Agent 给出。"
    },
    {
     "id": "S2",
-    "quote": "你去看对应的解决方案，再跟我回答这四个问题，然后让我评判，岂不是会更好？",
-    "observation": "学生要求先研究已有的通过方案，再基于证据回答，而不是凭猜测回答；并保留了评判权。",
+    "json_pointer": "/conversations/6/content",
+    "quote": "因为我觉得你现在解决的问题，一定都是一些经典问题的变种。",
+    "observation": "学生把当前问题归入'经典问题变种'这一类，并要求先看现成方案再回答。",
     "dimension_hint": "问题理解与自主拆解",
-    "tier_hint": "1.0：提出了可执行的方法并被实际执行（找到参考实现、用于差分与材料结构）。",
-    "json_pointer": "/conversations/6/content"
+    "tier_hint": "1.0~1.5：方法被实际执行并产生结果（找到参考实现、用于差分与材料）。"
    },
    {
     "id": "S3",
+    "json_pointer": "/conversations/7/content",
     "quote": "完全支持你，你可以先试一轮，试完之后我们再来回答这个问题？",
-    "observation": "学生把'先做实验、再讨论'定为顺序，批准了一轮性能实验。",
+    "observation": "学生把'先做实验、再讨论'定为顺序，批准一轮性能实验。",
     "dimension_hint": "实验与反馈迭代",
-    "tier_hint": "1.0：实验有实际结果（130→2530 qps），但实验设计由 Agent 完成。",
-    "json_pointer": "/conversations/7/content"
+    "tier_hint": "1.0：实验有实际结果（130→2530 qps），实验设计由 Agent 完成。"
    },
    {
     "id": "S4",
+    "json_pointer": "/conversations/11/content",
     "quote": "你确定吗？",
-    "observation": "学生对 Agent 的结论提出质疑，并附上部署手册，促成了一次结论纠正。",
+    "observation": "学生对 Agent 的结论提出质疑，并附上部署手册，促成一次结论纠正。",
     "dimension_hint": "独立验证与质疑",
-    "tier_hint": "1.0：质疑带来了实际复查结果（发现队列中的实例与 0 余额问题）。",
-    "json_pointer": "/conversations/11/content"
+    "tier_hint": "1.0：质疑带来实际复查结果（发现队列实例与 0 余额问题）。"
    },
    {
     "id": "S5",
+    "json_pointer": "/conversations/8/content",
     "quote": "2",
-    "observation": "在性能与 Agent Prompt 两条路线中，学生选择先做 Prompt。",
+    "observation": "在性能与 Prompt 两条路线中，学生选择先做 Prompt。",
     "dimension_hint": "取舍与反思",
-    "tier_hint": "0.5：只有选择，没有学生本人的理由陈述。",
-    "json_pointer": "/conversations/8/content"
+    "tier_hint": "0.5：只有选择，没有理由陈述。"
+   },
+   {
+    "id": "S6",
+    "json_pointer": "/conversations/16/content",
+    "quote": "那现在我要做出成绩，我应该怎么办？",
+    "observation": "学生把目标明确为'做出成绩'（得分），并要求给出行动方案。",
+    "dimension_hint": "取舍与反思",
+    "tier_hint": "0.5：目标陈述，没有方案。"
+   },
+   {
+    "id": "S7",
+    "json_pointer": "/conversations/17/content",
+    "quote": "我觉得你现在要想办法先做到拿分门槛",
+    "observation": "学生把'先过拿分门槛'设为约束，改变了优化目标（从追求指标到先进入得分名次）。",
+    "dimension_hint": "问题理解与自主拆解",
+    "tier_hint": "1.0：约束明确，且随后用榜单数据算出了具体门槛。"
    }
   ]
  },
@@ -304,5 +361,25 @@
   "S5 只有选择没有理由；S1/S2 的后续执行由 Agent 完成，学生未亲自复述机制。",
   "case_amd 没有得分产出，只记录了一次被学生质疑推翻的结论。",
   "性能基准为本地容器实测，不等于平台正式性能分；正式提测的性能项当前仍为'无效'，原因未获平台说明。"
- ]
+ ],
+ "scoring_context": {
+  "source": "platform playoff leaderboard, queried 2026-11-15",
+  "performance_board": {
+   "teams": 231,
+   "rank1": 5586.298862,
+   "rank20": 4884.7,
+   "rank80": 3978.0,
+   "rank100": 3512.9
+  },
+  "prompt_board": {
+   "teams": 165,
+   "rank1": 67.0,
+   "rank20": 21.5,
+   "rank80": 6.5,
+   "rank132": 1.5
+  },
+  "points_rule": "each rank is worth 0.5 points; rank 80 is the last scoring rank (0.5), so both boards need rank <= 80",
+  "our_state": "admission passed (29/29); performance invalid = 0; prompt raw 1.0 = rank about 150 = 0",
+  "implication": "to score at all we need a valid performance result above E~3978 or a prompt raw score of at least ~6.5"
+ }
 }
