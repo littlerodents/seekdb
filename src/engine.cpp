@@ -1130,6 +1130,16 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
   return r;
 }
 
+void Engine::note_created_table(const std::string &table) {
+  if (!in_tx_) {
+    return;
+  }
+  UndoEntry entry;
+  entry.kind = UndoEntry::Kind::kCreateTable;
+  entry.table = table;
+  undo_.push_back(std::move(entry));
+}
+
 void Engine::note_undo(const std::string &table, int64_t pk) {
   if (!in_tx_) {
     return;
@@ -1201,6 +1211,12 @@ Result Engine::exec_rollback() {
   }
   // Undo in reverse order so a row written by several statements ends at its original value.
   for (auto it = undo_.rbegin(); it != undo_.rend(); ++it) {
+    if (it->kind == UndoEntry::Kind::kCreateTable) {
+      // The table only ever existed inside this transaction; ROLLBACK removes it entirely
+      // instead of leaving an empty shell behind for the next checkpoint to persist.
+      storage_.drop_table(it->table);
+      continue;
+    }
     if (storage_.find_table(it->table) == nullptr) {
       continue;
     }
@@ -1255,6 +1271,7 @@ Result Engine::execute(const std::string &sql, const std::string &search_mode) {
       Result r = exec_create_table(stmt);
       if (r.ok) {
         dirty_ = true;
+        note_created_table(stmt.table);
         std::string payload;
         payload.push_back(static_cast<char>(REDO_CREATE_TABLE));
         const Table *t = storage_.find_table(stmt.table);

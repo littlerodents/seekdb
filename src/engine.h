@@ -78,9 +78,12 @@ private:
   // to the transaction's own write set rather than to the table size.
   bool in_tx_ = false;
   struct UndoEntry {
+    // kRow restores one row's pre-image; kCreateTable drops a table the transaction created.
+    enum class Kind { kRow, kCreateTable };
+    Kind kind = Kind::kRow;
     std::string table;
     int64_t pk = 0;
-    bool existed = false;   // false: the row did not exist before this transaction
+    bool existed = false;   // for kRow: false means the row did not exist before this transaction
     Row before;             // pre-image, valid when existed
   };
   std::vector<UndoEntry> undo_;
@@ -93,8 +96,11 @@ private:
 
   // Captures the current on-disk state of one row before the transaction changes it.  Only the
   // first pre-image of a row is kept, so rewriting the same row inside a transaction still
-  // rolls back to the original value.
+  // rolls back to its original value.
   void note_undo(const std::string &table, int64_t pk);
+  // Records that the transaction created a table, so ROLLBACK can drop it again.  Without this a
+  // table created inside a transaction survived both ROLLBACK and the following checkpoint.
+  void note_created_table(const std::string &table);
 };
 
 }  // namespace mvdb
