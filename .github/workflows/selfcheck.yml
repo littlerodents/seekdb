@@ -43,13 +43,27 @@ jobs:
           assert isinstance(doc, dict), "top level must be an object"
           assert size <= 128 * 1024, f"{size} bytes exceeds 128 KiB"
           print(f"agent/conversation.json: {size} bytes, {len(doc)} top-level keys, valid JSON object")
-          for entry in doc["student_contribution_index"]["entries"]:
-              ptr, quote = entry["json_pointer"], entry["quote"]
+          def resolve(doc, ptr):
               cur = doc
               for tok in ptr.strip("/").split("/"):
+                  tok = tok.replace("~1", "/").replace("~0", "~")
                   cur = cur[int(tok)] if isinstance(cur, list) else cur[tok]
-              assert cur == quote, f"{entry['id']}: pointer does not resolve to the quote"
-          print("all student_contribution_index pointers resolve to their quotes")
+              return cur
+
+          for section in ("student_contribution_index", "case_studies"):
+              for entry in (doc[section]["entries"] if section == "student_contribution_index" else doc[section]):
+                  refs = [entry] if "quote" in entry else []
+                  for key in ("user_prompt_refs", "evidence_refs"):
+                      refs.extend(entry.get(key, []))
+                  for ref in refs:
+                      ptr = ref.get("json_pointer", ref.get("pointer"))
+                      quote = ref["quote"]
+                      assert ptr, f"{ref.get('id')}: missing json_pointer"
+                      assert len(quote) <= 240, f"{ref.get('id')}: quote exceeds 240 chars"
+                      target = resolve(doc, ptr)
+                      assert isinstance(target, str) and quote in target, (
+                          f"{ref.get('id')}: {ptr} does not contain the quoted text")
+          print("all material references resolve to text containing their quotes")
           PY
 
       - name: Crash durability

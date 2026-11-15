@@ -169,13 +169,13 @@
    "user_prompt_refs": [
     {
      "id": "u05",
-     "pointer": "/conversations/4/content",
-     "quote": "我觉得问题是什么？你一直是在用一些低效的努力，用战术的勤勉来掩盖战略的懒惰啊"
+     "quote": "我觉得问题是什么？你一直是在用一些低效的努力，用战术的勤勉来掩盖战略的懒惰啊",
+     "json_pointer": "/conversations/4/content"
     },
     {
      "id": "u07",
-     "pointer": "/conversations/6/content",
-     "quote": "你去看对应的解决方案，再跟我回答这四个问题，然后让我评判，岂不是会更好？"
+     "quote": "你去看对应的解决方案，再跟我回答这四个问题，然后让我评判，岂不是会更好？",
+     "json_pointer": "/conversations/6/content"
     }
    ],
    "result": "差分第一条就定位到 INSERT 列清单不支持；修正后公开 20/20、130 条差分零内容差异，提测 a04ce5d4 准入 s/f=1/0（e02/e03/e04）。",
@@ -183,13 +183,13 @@
    "evidence_refs": [
     {
      "id": "e02",
-     "pointer": "/experiments/1/output",
-     "quote": "唯一内容级差异：INSERT INTO u (s, id) VALUES ('xy', 2), ('abc', 1) 我们返回"
+     "quote": "唯一内容级差异：INSERT INTO u (s, id) VALUES ('xy', 2), ('abc', 1) 我们返回",
+     "json_pointer": "/experiments/1/output"
     },
     {
      "id": "e04",
-     "pointer": "/experiments/3/output",
-     "quote": "MySQL 正式用例：successCount=1, failCount=0"
+     "quote": "MySQL 正式用例：successCount=1, failCount=0",
+     "json_pointer": "/experiments/3/output"
     }
    ]
   },
@@ -199,8 +199,8 @@
    "user_prompt_refs": [
     {
      "id": "u08",
-     "pointer": "/conversations/7/content",
-     "quote": "完全支持你，你可以先试一轮，试完之后我们再来回答这个问题？"
+     "quote": "完全支持你，你可以先试一轮，试完之后我们再来回答这个问题？",
+     "json_pointer": "/conversations/7/content"
     }
    ],
    "result": "缓存解码行 7.72→1.03s，排序复用缓存行 1.03→0.40s，单遍融合 + float 车道后 0.40s（2530 qps），峰值内存 11MB（e05）。",
@@ -208,8 +208,8 @@
    "evidence_refs": [
     {
      "id": "e05",
-     "pointer": "/experiments/4/output",
-     "quote": "我们修前：0.55s / 7.72s（130 qps）/ 9MB；行缓存后 1.03s（966 qps）；单遍融合 + float 车道后 0.40s（2530 qps）/ 11MB。"
+     "quote": "我们修前：0.55s / 7.72s（130 qps）/ 9MB；行缓存后 1.03s（966 qps）；单遍融合 + float 车道后 0.40s（2530 qps）/ 11MB。",
+     "json_pointer": "/experiments/4/output"
     }
    ]
   },
@@ -219,8 +219,8 @@
    "user_prompt_refs": [
     {
      "id": "u12",
-     "pointer": "/conversations/11/content",
-     "quote": "你确定吗？"
+     "quote": "你确定吗？",
+     "json_pointer": "/conversations/11/content"
     }
    ],
    "result": "Agent 原结论'没有可用的 GPU 模板'被推翻：按学生给的部署手册复查后，发现队列里已有一台 one-click 实例、镜像就是大赛的 amd-oneclick-base；同时也查出 Radeon Cloud 余额为 0，充值后实例启动。后续又发现该镜像缺 /opt/hipvs，无法验证 CAGRA，最终销毁止损，剩余 18 积分。",
@@ -233,8 +233,8 @@
    "user_prompt_refs": [
     {
      "id": "u07",
-     "pointer": "/conversations/6/content",
-     "quote": "因为我觉得你现在解决的问题，一定都是一些经典问题的变种。"
+     "quote": "因为我觉得你现在解决的问题，一定都是一些经典问题的变种。",
+     "json_pointer": "/conversations/6/content"
     }
    ],
    "result": "找到并通过准入的参考实现（AtoFuture，正式分 1630.67）。其源码被编译成差分预言机（e02），其 78KB 的 conversation.json 结构被用作本材料的组织依据。",
@@ -242,8 +242,8 @@
    "evidence_refs": [
     {
      "id": "e02",
-     "pointer": "/experiments/1/output",
-     "quote": "58 条第一批 + 40 条第二批 + 32 条事务边界。"
+     "quote": "58 条第一批 + 40 条第二批 + 32 条事务边界。",
+     "json_pointer": "/experiments/1/output"
     }
    ]
   }
@@ -253,43 +253,43 @@
   "entries": [
    {
     "id": "S1",
-    "pointer": "/conversations/4/content",
     "quote": "我觉得问题是什么？你一直是在用一些低效的努力，用战术的勤勉来掩盖战略的懒惰啊",
     "observation": "学生在看到连续四次'同一类失败'之后，没有继续要求改代码，而是指出方法问题：用提测次数代替诊断。",
     "dimension_hint": "独立验证与质疑",
-    "tier_hint": "1.0：学生提出具体问题并有后续实际结果（差分定位到列清单、准入通过），但因果关系与技术解释由 Agent 给出。"
+    "tier_hint": "1.0：学生提出具体问题并有后续实际结果（差分定位到列清单、准入通过），但因果关系与技术解释由 Agent 给出。",
+    "json_pointer": "/conversations/4/content"
    },
    {
     "id": "S2",
-    "pointer": "/conversations/6/content",
     "quote": "你去看对应的解决方案，再跟我回答这四个问题，然后让我评判，岂不是会更好？",
     "observation": "学生要求先研究已有的通过方案，再基于证据回答，而不是凭猜测回答；并保留了评判权。",
     "dimension_hint": "问题理解与自主拆解",
-    "tier_hint": "1.0：提出了可执行的方法并被实际执行（找到参考实现、用于差分与材料结构）。"
+    "tier_hint": "1.0：提出了可执行的方法并被实际执行（找到参考实现、用于差分与材料结构）。",
+    "json_pointer": "/conversations/6/content"
    },
    {
     "id": "S3",
-    "pointer": "/conversations/7/content",
     "quote": "完全支持你，你可以先试一轮，试完之后我们再来回答这个问题？",
     "observation": "学生把'先做实验、再讨论'定为顺序，批准了一轮性能实验。",
     "dimension_hint": "实验与反馈迭代",
-    "tier_hint": "1.0：实验有实际结果（130→2530 qps），但实验设计由 Agent 完成。"
+    "tier_hint": "1.0：实验有实际结果（130→2530 qps），但实验设计由 Agent 完成。",
+    "json_pointer": "/conversations/7/content"
    },
    {
     "id": "S4",
-    "pointer": "/conversations/11/content",
     "quote": "你确定吗？",
     "observation": "学生对 Agent 的结论提出质疑，并附上部署手册，促成了一次结论纠正。",
     "dimension_hint": "独立验证与质疑",
-    "tier_hint": "1.0：质疑带来了实际复查结果（发现队列中的实例与 0 余额问题）。"
+    "tier_hint": "1.0：质疑带来了实际复查结果（发现队列中的实例与 0 余额问题）。",
+    "json_pointer": "/conversations/11/content"
    },
    {
     "id": "S5",
-    "pointer": "/conversations/8/content",
     "quote": "2",
     "observation": "在性能与 Agent Prompt 两条路线中，学生选择先做 Prompt。",
     "dimension_hint": "取舍与反思",
-    "tier_hint": "0.5：只有选择，没有学生本人的理由陈述。"
+    "tier_hint": "0.5：只有选择，没有学生本人的理由陈述。",
+    "json_pointer": "/conversations/8/content"
    }
   ]
  },
