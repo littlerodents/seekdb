@@ -34,13 +34,15 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
-  /* 192 measured build=1.275x with gates=pass (7.11 points, up from 4.51 at 256).
-   * The prune phase is still the bottleneck, so this candidate takes the pool one
-   * step below cuVS's 1.5x-2x recommendation (160 = 1.25x graph_degree) to see how
-   * far the build can go before the 0.005 recall gate bites.  graph_degree (128)
-   * and nn_descent_niter (80) are unchanged from the 192 candidate. */
+  /* Measured on this exact path: ideg 256 -> 192 gave build=1.275x and 192 -> 160 gave
+   * 1.302x (7.36 points), so the prune phase is what this build is sensitive to and the
+   * pool stays at 160.  nn_descent_niter moves 80 -> 20 in this candidate: the only
+   * marginal data we have here is 100 -> 80 (1.04x, about 0.2% per iteration), which
+   * extrapolates to roughly 1.1x for 80 -> 20 -- an order of magnitude below the
+   * 0.30 s/iteration published for a standalone benchmark, so this submission measures
+   * the real marginal instead of assuming it. */
   h->ip->intermediate_graph_degree = 160;
-  h->ip->nn_descent_niter = 80;
+  h->ip->nn_descent_niter = 20;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
@@ -73,13 +75,19 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     dt=qt; dt.dl_tensor.data=dd; dt.dl_tensor.dtype.code=kDLFloat; dt.dl_tensor.shape=dsh;
     if (cuvsCagraSearchParamsCreate(&sp) != CUVS_SUCCESS) { rc=14; goto done; }
     {
+      /* Published on this stack: 512 -> 2.75 ms, 256 -> 1.25 ms, 128 loses 0.0148
+       * recall@10 (over the 0.005 gate); 256 is the lossless floor. */
       size_t required_itopk = (size_t)topk * 4;
-      if (required_itopk < 512) required_itopk = 512;
+      if (required_itopk < 256) required_itopk = 256;
       if (sp->itopk_size < required_itopk) sp->itopk_size = required_itopk;
       sp->search_width = 4;
     }
     cuvsFilter f; f.type=NO_FILTER; f.addr=(uintptr_t)0;
     if (cuvsCagraSearch(h->res, sp, h->idx, &qt, &nt, &dt, f) != CUVS_SUCCESS) { rc=15; goto done; }
+    /* The search runs asynchronously on the cuVS stream, so the host copies below would
+     * otherwise read half-written ids/distances at large n (a published measurement on
+     * this stack reports recall swinging between 0.21 and 1.0 from exactly this race). */
+    if (cuvsStreamSync(h->res) != CUVS_SUCCESS) { rc=17; goto done; }
     if (cudaMemcpy(out_ids, nd, sizeof(unsigned)*nq*topk, cudaMemcpyDefault) != cudaSuccess) { rc=16; goto done; }
     if (out_dist) cudaMemcpy(out_dist, dd, sizeof(float)*nq*topk, cudaMemcpyDefault);
   }
