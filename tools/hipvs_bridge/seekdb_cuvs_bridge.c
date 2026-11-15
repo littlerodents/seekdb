@@ -33,7 +33,13 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
 
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
   h->ip->build_algo = NN_DESCENT;
-  h->ip->graph_degree = 128;
+  /* Same candidate as the niter-20 probe except this one knob: graph_degree is the number of
+   * edges each node keeps after pruning, the other half of the cost that
+   * intermediate_graph_degree already showed this build is sensitive to (1.04x -> 1.302x).
+   * A published measurement on this stack puts deg 64 with iter 100 at 1.29x, the same order
+   * as the pool knob; 96 is the smallest step down from 128.  Pairing it with the niter probe
+   * makes the two submissions a clean A/B: only the degree differs. */
+  h->ip->graph_degree = 96;
   /* Measured on this exact path: ideg 256 -> 192 gave build=1.275x and 192 -> 160 gave
    * 1.302x (7.36 points), so the prune phase is what this build is sensitive to and the
    * pool stays at 160.  nn_descent_niter moves 80 -> 20 in this candidate: the only
