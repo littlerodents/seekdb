@@ -1235,7 +1235,74 @@ Result Engine::exec_rollback() {
   return r;
 }
 
+// Splits a request into statements on top-level semicolons, ignoring separators inside quoted
+// literals.  The protocol promises one statement per request, but a driver that batches
+// "BEGIN; INSERT ...; COMMIT;" into one line used to have everything after the first semicolon
+// dropped: parse_statement strips semicolons and parses only the leading statement, so the
+// transaction ran and the rows silently vanished.
+std::vector<std::string> split_statements(const std::string &sql) {
+  std::vector<std::string> out;
+  std::string current;
+  char quote = 0;
+  for (size_t i = 0; i < sql.size(); ++i) {
+    const char c = sql[i];
+    if (quote != 0) {
+      current.push_back(c);
+      if (c == '\\' && i + 1 < sql.size()) {
+        current.push_back(sql[++i]);
+      } else if (c == quote) {
+        quote = 0;
+      }
+      continue;
+    }
+    if (c == '\'' || c == '"') {
+      quote = c;
+      current.push_back(c);
+      continue;
+    }
+    if (c == ';') {
+      out.push_back(current);
+      current.clear();
+      continue;
+    }
+    current.push_back(c);
+  }
+  out.push_back(current);
+  return out;
+}
+
 Result Engine::execute(const std::string &sql, const std::string &search_mode) {
+  // Run every statement in the request and answer with the last one: a batch that mixes DDL,
+  // inserts and a COMMIT has to take effect as a whole, not just its first statement.
+  const std::vector<std::string> parts = split_statements(sql);
+  size_t nonempty = 0;
+  for (const auto &part : parts) {
+    if (part.find_first_not_of(" \t\r\n") != std::string::npos) {
+      ++nonempty;
+    }
+  }
+  if (nonempty > 1) {
+    Result last;
+    bool any = false;
+    for (const auto &part : parts) {
+      if (part.find_first_not_of(" \t\r\n") == std::string::npos) {
+        continue;
+      }
+      Result one = execute_one(part, search_mode);
+      if (!one.ok) {
+        return one;  // stop at the first failure so the batch is not half-applied silently
+      }
+      last = one;
+      any = true;
+    }
+    if (any) {
+      return last;
+    }
+  }
+  return execute_one(sql, search_mode);
+}
+
+Result Engine::execute_one(const std::string &sql, const std::string &search_mode) {
   Stmt stmt;
   std::string parse_err;
   if (!parse_statement(sql, stmt, parse_err)) {

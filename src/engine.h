@@ -31,6 +31,9 @@ public:
 
   // Executes one statement.  `search_mode` is "exact" or "ann".
   Result execute(const std::string &sql, const std::string &search_mode);
+  // Executes exactly one statement.  execute() splits a request on top-level semicolons and
+  // calls this for each part, so a batched "BEGIN; ...; COMMIT;" behaves as the whole batch.
+  Result execute_one(const std::string &sql, const std::string &search_mode);
 
   // Records the redo payload for the given statement; only called for committed work.
   bool persist(const Stmt &stmt, const std::vector<std::string> &changed_tables, std::string &err);
