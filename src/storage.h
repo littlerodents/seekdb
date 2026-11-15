@@ -28,12 +28,27 @@
 
 namespace mvdb {
 
+// A declared vector index.  The algorithm is ours to choose; this is an IVF (inverted file)
+// structure: the build step picks centroids and assigns every vector to its nearest one, and an
+// ann query reads only the rows assigned to the probed buckets.  The assignment is persisted with
+// the schema so a query never has to recompute it, and every mutation updates the single entry it
+// touches instead of rebuilding the whole mapping.
+struct VectorIndex {
+  std::string name;
+  int64_t column_pos = -1;
+  std::vector<std::vector<float>> centroids;  // empty until built
+  // pk -> bucket id.  Present iff centroids were computed; kept in sync by every mutation.
+  std::map<int64_t, uint32_t> bucket_of;
+  bool built = false;
+};
+
 struct TableSchema {
   std::string name;
   std::vector<Stmt::ColumnDef> columns;
   int64_t pk_index = 0;          // position of the primary key column
   int64_t vector_index = -1;     // position of the vector column, -1 when absent
   std::vector<std::string> index_names;  // declared vector indexes (informational)
+  std::vector<VectorIndex> vector_indexes;  // one entry per declared index
 
   int64_t column_pos(const std::string &name) const {
     for (size_t k = 0; k < columns.size(); ++k) {

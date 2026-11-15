@@ -262,6 +262,26 @@ void encode_schema(std::string &out, const TableSchema &s) {
   for (const auto &n : s.index_names) {
     put_str(out, n);
   }
+  // Vector indexes follow the name list.  A schema written before this field existed simply ends
+  // here, which decode_schema detects as end-of-buffer and treats as "no indexes built yet".
+  put_u32(out, static_cast<uint32_t>(s.vector_indexes.size()));
+  for (const auto &idx : s.vector_indexes) {
+    put_str(out, idx.name);
+    put_u64(out, static_cast<uint64_t>(idx.column_pos));
+    out.push_back(idx.built ? 1 : 0);
+    put_u32(out, static_cast<uint32_t>(idx.centroids.size()));
+    for (const auto &c : idx.centroids) {
+      put_u32(out, static_cast<uint32_t>(c.size()));
+      if (!c.empty()) {
+        out.append(reinterpret_cast<const char *>(c.data()), c.size() * sizeof(float));
+      }
+    }
+    put_u32(out, static_cast<uint32_t>(idx.bucket_of.size()));
+    for (const auto &kv : idx.bucket_of) {
+      put_u64(out, static_cast<uint64_t>(kv.first));
+      put_u32(out, kv.second);
+    }
+  }
 }
 
 bool decode_schema(const char *&p, const char *end, TableSchema &s) {
@@ -304,6 +324,61 @@ bool decode_schema(const char *&p, const char *end, TableSchema &s) {
   }
   s.pk_index = 0;
   s.vector_index = -1;
+  // The vector-index block is optional: a schema written before it existed ends after the name
+  // list, so hitting end-of-buffer here is a valid old image, not corruption.
+  if (p < end) {
+    uint32_t nvi = 0;
+    if (!get_u32(p, end, nvi)) {
+      return false;
+    }
+    s.vector_indexes.resize(nvi);
+    for (uint32_t i = 0; i < nvi; ++i) {
+      VectorIndex &idx = s.vector_indexes[i];
+      if (!get_str(p, end, idx.name)) {
+        return false;
+      }
+      uint64_t colpos = 0;
+      if (!get_u64(p, end, colpos)) {
+        return false;
+      }
+      idx.column_pos = static_cast<int64_t>(colpos);
+      if (end - p < 1) {
+        return false;
+      }
+      idx.built = (*p++ != 0);
+      uint32_t nc = 0;
+      if (!get_u32(p, end, nc)) {
+        return false;
+      }
+      idx.centroids.resize(nc);
+      for (uint32_t c = 0; c < nc; ++c) {
+        uint32_t dim = 0;
+        if (!get_u32(p, end, dim)) {
+          return false;
+        }
+        if (end - p < static_cast<ptrdiff_t>(dim) * static_cast<ptrdiff_t>(sizeof(float))) {
+          return false;
+        }
+        idx.centroids[c].resize(dim);
+        if (dim > 0) {
+          std::memcpy(idx.centroids[c].data(), p, static_cast<size_t>(dim) * sizeof(float));
+        }
+        p += static_cast<size_t>(dim) * sizeof(float);
+      }
+      uint32_t nb = 0;
+      if (!get_u32(p, end, nb)) {
+        return false;
+      }
+      for (uint32_t b = 0; b < nb; ++b) {
+        uint64_t pk = 0;
+        uint32_t bucket = 0;
+        if (!get_u64(p, end, pk) || !get_u32(p, end, bucket)) {
+          return false;
+        }
+        idx.bucket_of[static_cast<int64_t>(pk)] = bucket;
+      }
+    }
+  }
   for (size_t k = 0; k < s.columns.size(); ++k) {
     if (s.columns[k].primary_key) {
       s.pk_index = static_cast<int64_t>(k);

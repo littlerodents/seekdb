@@ -41,6 +41,11 @@ public:
 private:
   Result exec_create_table(const Stmt &stmt);
   Result exec_create_index(const Stmt &stmt);
+  // Computes the IVF centroids for one declared index; the ann read path probes them.
+  bool build_vector_index(Table &table, VectorIndex &index);
+  // Keeps an index's pk -> bucket mapping in step with a row that was just written or removed.
+  void index_note_row(Table &table, int64_t pk, const Row &row);
+  void index_forget_row(Table &table, int64_t pk);
   Result exec_insert(const Stmt &stmt);
   // Reorders INSERT rows from an explicit column list into table-definition order.
   bool normalize_insert_columns(Stmt &stmt, std::string &err);
