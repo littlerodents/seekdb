@@ -2,6 +2,7 @@
 #include "seekdb_cuvs_bridge.h"
 #include <cuvs/core/c_api.h>
 #include <cuvs/neighbors/cagra.h>
+#include <cuvs/neighbors/ivf_pq.h>
 #include <dlpack/dlpack.h>
 #ifdef __HIP_PLATFORM_AMD__
 #include <cuvs/cuda_runtime.h>
@@ -28,6 +29,11 @@ typedef struct {
   long                    stage_topk;
   cuvsCagraSearchParams_t sp;
   long                    sp_topk;
+  /* IVF-PQ build parameters (only used when build_algo == IVF_PQ); kept alive for the handle's
+   * lifetime because the CAGRA params struct only borrows the pointer. */
+  cuvsIvfPqIndexParams_t  ivf_build;
+  cuvsIvfPqSearchParams_t ivf_search;
+  cuvsIvfPqParams         ivf_params;  /* must outlive cuvsCagraBuild: the params struct borrows it */
 } sk_cuvs_index;
 
 void* seekdb_cuvs_build(const float* base, long n, long dim)
@@ -44,7 +50,10 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   dset.dl_tensor.shape = ds; dset.dl_tensor.strides = 0; dset.dl_tensor.byte_offset = 0;
 
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
-  h->ip->build_algo = NN_DESCENT;
+  /* IVF-PQ builds the graph from a PQ index instead of running NN-descent, which is where the
+   * remaining build time sits on this path (iterations were cheap; the fixed graph work was
+   * not).  PQ quality and refinement decide recall, which is the risk this probe measures. */
+  h->ip->build_algo = IVF_PQ;
   h->ip->graph_degree = 128;
   /* 192 measured build=1.275x with gates=pass (7.11 points, up from 4.51 at 256).
    * The prune phase is still the bottleneck, so this candidate takes the pool one
@@ -53,6 +62,13 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
    * and nn_descent_niter (80) are unchanged from the 192 candidate. */
   h->ip->intermediate_graph_degree = 160;
   h->ip->nn_descent_niter = 80;
+  if (cuvsIvfPqIndexParamsCreate(&h->ivf_build) != CUVS_SUCCESS) goto fail_ip;
+  if (cuvsIvfPqSearchParamsCreate(&h->ivf_search) != CUVS_SUCCESS) goto fail_ip;
+  h->ivf_build->kmeans_n_iters = 10;
+  h->ivf_params.ivf_pq_build_params = h->ivf_build;
+  h->ivf_params.ivf_pq_search_params = h->ivf_search;
+  h->ivf_params.refinement_rate = 1.0f;  /* refine candidates with full-precision distances */
+  h->ip->graph_build_params = &h->ivf_params;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
@@ -124,6 +140,8 @@ void seekdb_cuvs_free(void* handle)
   sk_cuvs_index* h = (sk_cuvs_index*)handle;
   if (!h) return;
   if (h->sp) cuvsCagraSearchParamsDestroy(h->sp);
+  if (h->ivf_build) cuvsIvfPqIndexParamsDestroy(h->ivf_build);
+  if (h->ivf_search) cuvsIvfPqSearchParamsDestroy(h->ivf_search);
   if (h->q_dev) cuvsRMMFree(h->res, h->q_dev, sizeof(float) * h->stage_nq * h->dim);
   if (h->ids_dev) cuvsRMMFree(h->res, h->ids_dev, sizeof(unsigned) * h->stage_nq * h->stage_topk);
   if (h->dist_dev) cuvsRMMFree(h->res, h->dist_dev, sizeof(float) * h->stage_nq * h->stage_topk);
