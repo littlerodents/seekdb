@@ -44,7 +44,12 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   dset.dl_tensor.shape = ds; dset.dl_tensor.strides = 0; dset.dl_tensor.byte_offset = 0;
 
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
-  h->ip->build_algo = NN_DESCENT;
+  /* Probe: let cuVS build the graph from its own IVF-PQ index using default parameters.
+   * The previous attempt passed a hand-built cuvsIvfPqParams and failed the evaluation with no
+   * diagnostics, so this one only flips the algorithm and leaves graph_build_params NULL --
+   * the smallest possible surface for the build path. */
+  h->ip->build_algo = IVF_PQ;
+  h->ip->graph_build_params = NULL;
   h->ip->graph_degree = 128;
   /* 192 measured build=1.275x with gates=pass (7.11 points, up from 4.51 at 256).
    * The prune phase is still the bottleneck, so this candidate takes the pool one
