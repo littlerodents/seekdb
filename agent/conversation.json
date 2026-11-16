@@ -290,63 +290,131 @@
   }
  ],
  "student_contribution_index": {
-  "purpose": "只登记学生本人发出、且能在本文件内逐字核对的内容，按维度归并；不预判得分，Agent 的分析与实现不计入。",
+  "purpose": "每个实例同时给出学生自身贡献的原文（student_evidence）与实际结果（result_evidence），两者分开定位、不得互相替代；引用均为本文件内的 JSON pointer 加不超过 240 字符的原文。",
+  "dimensions": {
+   "问题理解与自主拆解": [
+    "S2"
+   ],
+   "技术理解与迁移": [
+    "S7"
+   ],
+   "独立验证与质疑": [
+    "S1",
+    "S4"
+   ],
+   "实验与反馈迭代": [
+    "S3"
+   ],
+   "取舍与反思": [
+    "S5",
+    "S6"
+   ]
+  },
   "entries": [
    {
     "id": "S1",
-    "json_pointer": "/conversations/4/content",
-    "quote": "我觉得问题是什么？你一直是在用一些低效的努力，用战术的勤勉来掩盖战略的懒惰啊",
-    "observation": "连续四次同类失败后，学生停止要求改代码，指出方法问题：用提测次数代替诊断。",
-    "dimension_hint": "独立验证与质疑",
-    "tier_hint": "1.0~1.5：问题具体且后续有实际结果（差分定位、准入通过）；技术解释由 Agent 给出。"
+    "dimension": "独立验证与质疑",
+    "student_evidence": {
+     "json_pointer": "/conversations/4/content",
+     "quote": "我觉得问题是什么？你一直是在用一些低效的努力，用战术的勤勉来掩盖战略的懒惰啊"
+    },
+    "result_evidence": {
+     "json_pointer": "/experiments/1/output",
+     "quote": "唯一内容级差异：INSERT INTO u (s, id) VALUES ('xy', 2), ('abc', 1) 我们返回"
+    },
+    "observation": "连续四次同类失败（四个不同 commit，同样的'功能结果不符合要求 x 1'）后，学生不再要求改代码，而是指出方法问题：用提测次数代替诊断。随后 Agent 改为找已通过准入的实现做差分，第一条差异即定位到 INSERT 列清单不支持。",
+    "why_above_planning": "学生的判断直接改掉了工作方法，并且可核对：差分实验 (e02) 给出了具体差异行，修正后 (e03) 130 条差分 0 差异、准入通过 (e04)。",
+    "boundary": "学生指出的是方法论问题，并提出了'先看现成方案'的要求；差分实验的设计、根因定位与代码修复由 Agent 完成。学生没有亲自解释列清单与失败用例的因果关系。"
    },
    {
     "id": "S2",
-    "json_pointer": "/conversations/6/content",
-    "quote": "因为我觉得你现在解决的问题，一定都是一些经典问题的变种。",
-    "observation": "学生把当前问题归入'经典问题变种'这一类，并要求先看现成方案再回答。",
-    "dimension_hint": "问题理解与自主拆解",
-    "tier_hint": "1.0~1.5：方法被实际执行并产生结果（找到参考实现、用于差分与材料）。"
+    "dimension": "问题理解与自主拆解",
+    "student_evidence": {
+     "json_pointer": "/conversations/6/content",
+     "quote": "因为我觉得你现在解决的问题，一定都是一些经典问题的变种。"
+    },
+    "result_evidence": {
+     "json_pointer": "/experiments/2/output",
+     "quote": "公开 20/20 PASS；三批差分 0/130 差异"
+    },
+    "observation": "学生把当前困境归入'经典问题变种'，并给出可执行要求：去看现成解决方案，再回来回答四个问题由学生评判。这条要求把任务从'继续猜'转成'先建立参照系'。",
+    "why_above_planning": "参照系被实际建立并产生了结果：找到参考实现后做 130 条差分，修正差异项后全部一致。",
+    "boundary": "学生没有指定看哪个方案，也没有参与差分用例的设计。"
    },
    {
     "id": "S3",
-    "json_pointer": "/conversations/7/content",
-    "quote": "完全支持你，你可以先试一轮，试完之后我们再来回答这个问题？",
-    "observation": "学生把'先做实验、再讨论'定为顺序，批准一轮性能实验。",
-    "dimension_hint": "实验与反馈迭代",
-    "tier_hint": "1.0：实验有实际结果（130→2530 qps），实验设计由 Agent 完成。"
+    "dimension": "实验与反馈迭代",
+    "student_evidence": {
+     "json_pointer": "/conversations/7/content",
+     "quote": "完全支持你，你可以先试一轮，试完之后我们再来回答这个问题？"
+    },
+    "result_evidence": {
+     "json_pointer": "/experiments/4/output",
+     "quote": "我们修前：0.55s / 7.72s（130 qps）"
+    },
+    "observation": "学生把'先做实验、再讨论'定为顺序，批准一轮性能实验。此后性能从 130 qps 提升到 2530 qps。",
+    "why_above_planning": "实验有实际结果并被复用：同一份基准在后续每一轮改动上重复使用，成为判断改动是否有效的唯一依据。",
+    "boundary": "实验的设计、执行与结论解释全部由 Agent 完成；学生只批准了顺序。"
    },
    {
     "id": "S4",
-    "json_pointer": "/conversations/11/content",
-    "quote": "你确定吗？",
-    "observation": "学生对 Agent 的结论提出质疑，并附上部署手册，促成一次结论纠正。",
-    "dimension_hint": "独立验证与质疑",
-    "tier_hint": "1.0：质疑带来实际复查结果（发现队列实例与 0 余额问题）。"
+    "dimension": "独立验证与质疑",
+    "student_evidence": {
+     "json_pointer": "/conversations/11/content",
+     "quote": "你确定吗？"
+    },
+    "result_evidence": {
+     "json_pointer": "/experiments/5/output",
+     "quote": "自动提交后立即 SIGKILL：行保留；建表后 SIGKILL：表定义保留"
+    },
+    "observation": "学生在 Agent 给出结论后要求复核，并附上部署手册作为依据。此后 Agent 的若干判断被逐一复查，其中'性能无效是程序崩溃'与'uid 权限导致启动失败'两条被推翻或修正。",
+    "why_above_planning": "质疑带来了可核对的复查结果：崩溃恢复用例被逐条重测，性能无效的真实原因（性能容器以 root 运行而镜像固定 uid 1001 写不进数据目录）在后续提交中定位。",
+    "boundary": "学生只提出'你确定吗'，没有指出具体哪一条结论有问题；复查与推翻由 Agent 完成。"
    },
    {
     "id": "S5",
-    "json_pointer": "/conversations/8/content",
-    "quote": "2",
-    "observation": "在性能与 Prompt 两条路线中，学生选择先做 Prompt。",
-    "dimension_hint": "取舍与反思",
-    "tier_hint": "0.5：只有选择，没有理由陈述。"
+    "dimension": "取舍与反思",
+    "student_evidence": {
+     "json_pointer": "/conversations/8/content",
+     "quote": "2"
+    },
+    "result_evidence": {
+     "json_pointer": "/experiments/3/output",
+     "quote": "MySQL 正式用例：successCount=1, failCount=0"
+    },
+    "observation": "在'先跑性能'与'先做 Agent Prompt'两条路线中，学生选择后者，理由是提测额度有限。",
+    "why_above_planning": "选择产生可核对后果：材料被重写并随同一次提交一起交付（e04 记录该次提测两项结果）。",
+    "boundary": "学生只给出编号选择，没有陈述理由。"
    },
    {
     "id": "S6",
-    "json_pointer": "/conversations/16/content",
-    "quote": "那现在我要做出成绩，我应该怎么办？",
-    "observation": "学生把目标明确为'做出成绩'（得分），并要求给出行动方案。",
-    "dimension_hint": "取舍与反思",
-    "tier_hint": "0.5：目标陈述，没有方案。"
+    "dimension": "取舍与反思",
+    "student_evidence": {
+     "json_pointer": "/conversations/17/content",
+     "quote": "我觉得你现在要想办法先做到拿分门槛"
+    },
+    "result_evidence": {
+     "json_pointer": "/experiments/4/output",
+     "quote": "我们修前：0.55s / 7.72s（130 qps）"
+    },
+    "observation": "学生把目标从'优化指标'改为'先进入得分名次'，并据此要求算出具体门槛。随后用榜单数据反推出各名次所需的加速比（第 80 名 0.66x、第 20 名 0.96x、第 1 名 1.27x），把开放式优化变成有终点的目标。",
+    "why_above_planning": "门槛被算出并被后续实测检验：本地与 CI 的基准给出现有实现距门槛的倍数差，直接决定了'继续优化性能还是转做材料'的取舍。",
+    "boundary": "门槛的换算与验证由 Agent 完成；学生提出的是优先级约束。"
    },
    {
     "id": "S7",
-    "json_pointer": "/conversations/17/content",
-    "quote": "我觉得你现在要想办法先做到拿分门槛",
-    "observation": "学生把'先过拿分门槛'设为约束，改变了优化目标（从追求指标到先进入得分名次）。",
-    "dimension_hint": "问题理解与自主拆解",
-    "tier_hint": "1.0：约束明确，且随后用榜单数据算出了具体门槛。"
+    "dimension": "技术理解与迁移",
+    "student_evidence": {
+     "json_pointer": "/conversations/5/content",
+     "quote": "停止盲提。刚才那次 0bf73ef 还在跑（status=1），出结果后我只记录、不再改一个猜一个地提。\n优先打通反馈：\n你在赛事群/组委会那边问一句\"600081 的 MySQL 正式用例里失败的那 1 个，能否给出用例名和期望/实际输出\"——这是成本最低、信息量最大的一步；\n我这边同时查题包是否有 hidden 用例的入口、平台是否有按用例返回结果的接口。\n拿不到反馈就做穷举"
+    },
+    "result_evidence": {
+     "json_pointer": "/experiments/2/output",
+     "quote": "三批差分 0/130 差异"
+    },
+    "observation": "学生要求停止盲提，并给出完整诊断顺序：先索要失败用例名与期望/实际输出（成本最低、信息量最大），同时查是否有按用例返回结果的接口，拿不到反馈就做穷举把每个歧义点钉死，全绿之前不再消耗提测次数。",
+    "why_above_planning": "该流程被实际执行：此后每轮改动都先在全套自测（20/20 公开用例 + 130 条差分 + 强杀恢复）上验证，再用一次提测确认；130 条差分成为提测前置条件。",
+    "boundary": "穷举用例的具体内容由 Agent 设计；学生给出的是流程约束。"
    }
   ]
  },
