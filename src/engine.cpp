@@ -1176,9 +1176,9 @@ Result Engine::exec_commit() {
   }
   // The transaction's writes become durable here: one fsynced redo record per statement,
   // written before the success response is produced.
-  for (const std::string &payload : tx_redo_) {
+  {
     std::string err;
-    if (!storage_.append_redo(payload, err)) {
+    if (!storage_.append_redo_batch(tx_redo_, err)) {
       in_tx_ = false;
       undo_.clear();
       tx_redo_.clear();

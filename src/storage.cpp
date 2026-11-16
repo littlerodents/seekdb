@@ -813,6 +813,29 @@ bool Storage::checkpoint(std::string &err) {
 }
 #endif  // superseded checkpoint
 
+bool Storage::append_redo_batch(const std::vector<std::string> &payloads, std::string &err) {
+  if (redo_fd_ < 0) {
+    err = "redo log is not open";
+    return false;
+  }
+  for (const std::string &payload : payloads) {
+    RedoHeader hdr{};
+    hdr.magic = kRedoMagic;
+    hdr.payload_len = static_cast<uint32_t>(payload.size());
+    hdr.crc = crc32_of(payload.data(), payload.size());
+    if (!write_all(redo_fd_, reinterpret_cast<const char *>(&hdr), sizeof(hdr)) ||
+        !write_all(redo_fd_, payload.data(), payload.size())) {
+      err = "cannot append redo record";
+      return false;
+    }
+  }
+  if (::fsync(redo_fd_) != 0) {
+    err = "cannot fsync redo log";
+    return false;
+  }
+  return true;
+}
+
 bool Storage::append_redo(const std::string &payload, std::string &err) {
   if (redo_fd_ < 0) {
     err = "redo log is not open";

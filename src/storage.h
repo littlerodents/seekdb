@@ -93,6 +93,9 @@ public:
   // operation; the log write is fsynced before returning so an acknowledged commit is
   // durable.
   bool append_redo(const std::string &payload, std::string &err);
+  // Appends every payload of one commit and fsyncs once.  A per-statement fsync would make a
+  // 100-row transaction pay 100 syncs on the same commit.
+  bool append_redo_batch(const std::vector<std::string> &payloads, std::string &err);
 
   const std::string &dir() const { return dir_; }
   std::vector<std::string> table_names() const;
