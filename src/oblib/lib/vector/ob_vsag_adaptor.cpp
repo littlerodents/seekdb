@@ -429,7 +429,12 @@ static bool ob_cuvs_serialize(void *key, std::ostream &out, int &ret) {
     LOG_WARN("[OBVSAG][cuVS] failed to write snapshot stream", K(ret), KP(key), K(n));
     return true;
   }
-  std::vector<char> chunk(65536);
+  // Copy the serialized CAGRA graph out of the scratch file into the snapshot stream.  The
+  // buffer used to be 64 KiB, which turned a multi-megabyte graph into hundreds of fread +
+  // ostream::write round trips and dominated the snapshot half of the build measurement.
+  // A multi-megabyte buffer collapses that to a handful of copies without changing the bytes.
+  constexpr size_t kGraphCopyChunk = 8UL * 1024 * 1024;
+  std::vector<char> chunk(std::min<uint64_t>(kGraphCopyChunk, graph_bytes > 0 ? graph_bytes : 1));
   uint64_t remaining = graph_bytes;
   while (remaining > 0) {
     const size_t bytes = std::min<uint64_t>(remaining, chunk.size());
