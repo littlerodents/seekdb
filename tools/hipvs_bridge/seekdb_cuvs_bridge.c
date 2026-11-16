@@ -51,7 +51,7 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
    * step below cuVS's 1.5x-2x recommendation (160 = 1.25x graph_degree) to see how
    * far the build can go before the 0.005 recall gate bites.  graph_degree (128)
    * and nn_descent_niter (80) are unchanged from the 192 candidate. */
-  h->ip->intermediate_graph_degree = 160;
+  h->ip->intermediate_graph_degree = 144;
   h->ip->nn_descent_niter = 80;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
