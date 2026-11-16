@@ -109,6 +109,25 @@ jobs:
           print("VERDICT: query improved by %.2fx" % (sq / aq))
           PY
 
+      - name: Isolate the durability cost in the write path
+        run: |
+          set -e
+          # Three runs on the same binary: normal (fdatasync per commit), with the flush disabled
+          # (MVDB_NO_FSYNC, which is not a legal configuration — it only bounds how much the flush
+          # can possibly cost), and a repeat of the normal run to gauge noise.
+          for mode in fsync nofsync fsync_again; do
+            data="/tmp/wdata_$mode"
+            rm -rf "$data"; mkdir -p "$data"
+            start=$(date +%s%N)
+            if [ "$mode" = "nofsync" ]; then
+              MVDB_NO_FSYNC=1 /tmp/mvdb_avx2 --data "$data" < /tmp/load.jsonl > /tmp/wl_$mode.out 2>&1
+            else
+              /tmp/mvdb_avx2 --data "$data" < /tmp/load.jsonl > /tmp/wl_$mode.out 2>&1
+            fi
+            end=$(date +%s%N)
+            echo "WRITE mode=$mode elapsed=$(( (end - start) / 1000000 ))ms ok=$(grep -c '"ok":true' /tmp/wl_$mode.out || true)"
+          done
+
       - name: Correctness must be identical between the two kernels
         run: |
           python3 - <<'PY'

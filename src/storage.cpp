@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 
@@ -827,7 +828,22 @@ bool Storage::append_redo(const std::string &payload, std::string &err) {
     err = "cannot append redo record";
     return false;
   }
-  if (::fsync(redo_fd_) != 0) {
+  // MVDB_NO_FSYNC disables the per-commit flush.  It exists only so the benchmark can separate
+  // "time spent computing" from "time spent waiting for the disk".  Leaving it set violates the
+  // durability contract the task requires, so nothing but the local A/B measurement sets it.
+  static const bool skip_fsync = ::getenv("MVDB_NO_FSYNC") != nullptr;
+  // fdatasync where it exists: the redo log is append-only, so the only metadata that changes is
+  // the file length, and fdatasync is required to flush what is needed to read the data back.  On
+  // platforms without it (macOS) plain fsync is the portable equivalent.
+  bool flushed = true;
+  if (!skip_fsync) {
+#if defined(__linux__)
+    flushed = ::fdatasync(redo_fd_) == 0;
+#else
+    flushed = ::fsync(redo_fd_) == 0;
+#endif
+  }
+  if (!flushed) {
     err = "cannot fsync redo log";
     return false;
   }
