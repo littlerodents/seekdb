@@ -45,12 +45,13 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
 
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
   h->ip->build_algo = NN_DESCENT;
-  h->ip->graph_degree = 128;
-  /* 192 measured build=1.275x with gates=pass (7.11 points, up from 4.51 at 256).
-   * The prune phase is still the bottleneck, so this candidate takes the pool one
-   * step below cuVS's 1.5x-2x recommendation (160 = 1.25x graph_degree) to see how
-   * far the build can go before the 0.005 recall gate bites.  graph_degree (128)
-   * and nn_descent_niter (80) are unchanged from the 192 candidate. */
+  /* graph_degree is the out-degree of the finished graph and had never been moved off the
+   * 128 default.  Unlike intermediate_graph_degree (the prune pool) it changes how many edges
+   * the prune phase has to keep, so it is the remaining lever on build time.  160 for the pool
+   * kept graph_degree at 1.25x, the ratio cuVS documents as the floor of the recommended band;
+   * 96 finishes the graph at 96 edges and is the smallest step below the default that still
+   * leaves a healthy neighbourhood.  The 0.005 recall gate is the constraint to watch. */
+  h->ip->graph_degree = 96;
   h->ip->intermediate_graph_degree = 160;
   h->ip->nn_descent_niter = 80;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
