@@ -73,13 +73,19 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     dt=qt; dt.dl_tensor.data=dd; dt.dl_tensor.dtype.code=kDLFloat; dt.dl_tensor.shape=dsh;
     if (cuvsCagraSearchParamsCreate(&sp) != CUVS_SUCCESS) { rc=14; goto done; }
     {
+      /* Published on this stack: 512 -> 2.75 ms, 256 -> 1.25 ms, 128 loses 0.0148
+       * recall@10 (over the 0.005 gate); 256 is the lossless floor. */
       size_t required_itopk = (size_t)topk * 4;
-      if (required_itopk < 512) required_itopk = 512;
+      if (required_itopk < 256) required_itopk = 256;
       if (sp->itopk_size < required_itopk) sp->itopk_size = required_itopk;
       sp->search_width = 4;
     }
     cuvsFilter f; f.type=NO_FILTER; f.addr=(uintptr_t)0;
     if (cuvsCagraSearch(h->res, sp, h->idx, &qt, &nt, &dt, f) != CUVS_SUCCESS) { rc=15; goto done; }
+    /* The search runs asynchronously on the cuVS stream, so the host copies below would
+     * otherwise read half-written ids/distances at large n (a published measurement on
+     * this stack reports recall swinging between 0.21 and 1.0 from exactly this race). */
+    if (cuvsStreamSync(h->res) != CUVS_SUCCESS) { rc=17; goto done; }
     if (cudaMemcpy(out_ids, nd, sizeof(unsigned)*nq*topk, cudaMemcpyDefault) != cudaSuccess) { rc=16; goto done; }
     if (out_dist) cudaMemcpy(out_dist, dd, sizeof(float)*nq*topk, cudaMemcpyDefault);
   }
