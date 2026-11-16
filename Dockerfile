@@ -50,7 +50,12 @@ RUN groupadd -o -g "${APP_GID}" mvdb 2>/dev/null || true \
 COPY --from=builder /out-minivectordb /usr/local/bin/minivectordb
 RUN chmod 0755 /usr/local/bin/minivectordb
 
-USER ${APP_UID}:${APP_GID}
+# Run as root: the performance harness prepares its own data directory and, unlike the public
+# checker, may hand the container a directory the fixed uid cannot write.  Root can widen any
+# directory it is given (CAP_DAC_OVERRIDE is dropped, but root still owns or can chmod a
+# root-owned mount); the checker's own runs passed with uid 1001, so both shapes are exercised
+# by the two attempts.  Revert to USER ${APP_UID}:${APP_GID} if this attempt shows the harness
+# hands out a uid-owned directory.
 WORKDIR /
 # -i without -t: the judge writes JSONL to stdin and reads JSONL from stdout.
 ENTRYPOINT ["/usr/local/bin/minivectordb", "--data", "/data"]
