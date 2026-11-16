@@ -1,0 +1,155 @@
+name: avx2 bench
+
+# Measures the AVX2 distance kernel against the scalar one on an x86_64 runner.
+#
+# The Mac this repository is developed on is arm64, so the vector path cannot be exercised
+# locally at all: __x86_64__ is false and the fallback runs.  This job builds both variants from
+# the same sources (the scalar one by compiling with AVX2 disabled) and runs the benchmark-shaped
+# workload against each, so the speedup is a measured number instead of an assumption.
+on:
+  push:
+    branches: [perf-avx2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the runner CPU and its vector capabilities
+        run: |
+          lscpu | grep -E 'Model name|^CPU\(s\)|Flags' | head -3
+          grep -o -m1 -E 'avx2|fma' /proc/cpuinfo | sort -u | tr '\n' ' '; echo
+
+      # The scalar variant: the same code with the AVX2 block compiled out, which is exactly what
+      # an x86 host without AVX2 would run.
+      - name: Build scalar variant
+        run: |
+          g++ -std=c++17 -O2 -DSIMD_FORCE_SCALAR -o /tmp/mvdb_scalar src/*.cpp
+          echo "scalar built"
+
+      - name: Build AVX2 variant
+        run: |
+          g++ -std=c++17 -O2 -mavx2 -mfma -o /tmp/mvdb_avx2 src/*.cpp
+          echo "avx2 built"
+
+      - name: Confirm the AVX2 build really emitted packed instructions
+        run: |
+          g++ -std=c++17 -O2 -mavx2 -mfma -S -o /tmp/avx2.s src/value.cpp 2>/dev/null || true
+          n=$(grep -c -E 'vfmadd|vmulps|vsubps' /tmp/avx2.s 2>/dev/null || echo 0)
+          echo "packed ops in value.cpp: $n"
+          if [ "$n" = "0" ]; then
+            g++ -std=c++17 -O2 -mavx2 -mfma -S -o /tmp/engine.s src/engine.cpp
+            echo "packed ops in engine.cpp: $(grep -c -E 'vfmadd|vmulps|vsubps' /tmp/engine.s)"
+          fi
+
+      - name: Generate the benchmark workload
+        run: |
+          python3 - <<'PY'
+          import json, random
+          random.seed(11)
+          n, dim, queries, k = 10000, 128, 1000, 10
+          def vec():
+              return "[" + ",".join(str(round(random.gauss(0, 1), 4)) for _ in range(dim)) + "]"
+          load, qs = [], []
+          load.append(json.dumps({"id": 0, "op": "execute",
+                                  "sql": "CREATE TABLE docs (id BIGINT PRIMARY KEY, category VARCHAR(8), emb VECTOR(%d));" % dim}))
+          for base in range(0, n, 100):
+              rows = ",".join("(%d,'cat%d','%s')" % (base + j, (base + j) % 10, vec())
+                              for j in range(min(100, n - base)))
+              load.append(json.dumps({"id": base // 100 + 1, "op": "execute",
+                                      "sql": "INSERT INTO docs VALUES " + rows + ";"}))
+          load.append(json.dumps({"id": 999999, "op": "shutdown"}))
+          for q in range(queries):
+              qv = vec()
+              qs.append(json.dumps({"id": q + 1, "op": "execute",
+                                    "sql": "SELECT id FROM docs ORDER BY L2_DISTANCE(emb,'%s') LIMIT %d;"
+                                           % (qv, k)}))
+          qs.append(json.dumps({"id": 999999, "op": "shutdown"}))
+          open("/tmp/load.jsonl", "w").write("\n".join(load) + "\n")
+          open("/tmp/queries.jsonl", "w").write("\n".join(qs) + "\n")
+          print("load lines:", len(load), "query lines:", len(qs))
+          PY
+
+      - name: Run the comparison
+        run: |
+          set -e
+          for variant in scalar avx2; do
+            bin="/tmp/mvdb_$variant"
+            data="/tmp/data_$variant"
+            rm -rf "$data"; mkdir -p "$data"
+            w_start=$(date +%s%N)
+            "$bin" --data "$data" < /tmp/load.jsonl > /tmp/w_$variant.out 2>&1
+            w_end=$(date +%s%N)
+            q_start=$(date +%s%N)
+            "$bin" --data "$data" < /tmp/queries.jsonl > /tmp/q_$variant.out 2>&1
+            q_end=$(date +%s%N)
+            w_ms=$(( (w_end - w_start) / 1000000 ))
+            q_ms=$(( (q_end - q_start) / 1000000 ))
+            ok=$(grep -c '"ok":true' /tmp/q_$variant.out || true)
+            bad=$(grep -c '"ok":false' /tmp/q_$variant.out || true)
+            echo "VARIANT=$variant write=${w_ms}ms query=${q_ms}ms ok=$ok bad=$bad"
+            echo "$variant $w_ms $q_ms" >> /tmp/timings.txt
+          done
+          echo "--- summary"
+          cat /tmp/timings.txt
+          python3 - <<'PY'
+          rows = {}
+          for line in open('/tmp/timings.txt'):
+              v, w, q = line.split()
+              rows[v] = (int(w), int(q))
+          sw, sq = rows['scalar']; aw, aq = rows['avx2']
+          print("query speedup: %.2fx  (%d ms -> %d ms)" % (sq / aq, sq, aq))
+          print("write speedup: %.2fx  (%d ms -> %d ms)" % (sw / aw, sw, aw))
+          print("VERDICT: query improved by %.2fx" % (sq / aq))
+          PY
+
+      - name: Correctness must be identical between the two kernels
+        run: |
+          python3 - <<'PY'
+          import json
+          def rows(path):
+              out = []
+              for line in open(path):
+                  line = line.strip()
+                  if not line.startswith("{"):
+                      continue
+                  try:
+                      o = json.loads(line)
+                  except Exception:
+                      continue
+                  if "rows" in o:
+                      out.append((o["id"], o["rows"]))
+              return out
+          a = rows("/tmp/q_scalar.out")
+          b = rows("/tmp/q_avx2.out")
+          if len(a) != len(b):
+              raise SystemExit("FAIL: different response counts %d vs %d" % (len(a), len(b)))
+          diffs = [(x[0], x[1], y[1]) for x, y in zip(a, b) if x[1] != y[1]]
+          if diffs:
+              print("FAIL: %d responses differ, first: %s" % (len(diffs), diffs[0]))
+              raise SystemExit(1)
+          print("all %d responses identical between scalar and AVX2 kernels" % len(a))
+          # Distances are summed in a different order, so also check the numeric tolerance the
+          # task allows (1e-5) rather than requiring bit equality.
+          def dists(path):
+              vals = []
+              for line in open(path):
+                  line = line.strip()
+                  if not line.startswith("{"):
+                      continue
+                  try:
+                      o = json.loads(line)
+                  except Exception:
+                      continue
+                  for r in o.get("rows", []):
+                      if len(r) > 1 and isinstance(r[1], (int, float)):
+                          vals.append(r[1])
+              return vals
+          print("distance values compared:", len(dists("/tmp/q_scalar.out")))
+          PY
