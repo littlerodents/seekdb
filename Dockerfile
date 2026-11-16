@@ -12,7 +12,7 @@ COPY src/ ./src/
 # libstdc++ (3.4.30), and the dynamic loader kills the process before main() with no output
 # at all.  Linking statically makes the runtime image independent of the distro's gcc version
 # and of the CPU architecture.
-RUN g++ -std=c++17 -O2 -static-libstdc++ -static-libgcc -o /out-minivectordb src/*.cpp
+RUN g++ -std=c++17 -O3 -fno-plt -static-libstdc++ -static-libgcc -o /out-minivectordb src/*.cpp
 
 FROM debian:bookworm-slim
 # /data is the only writable location the judge mounts.  Mode 1777 lets any uid create files
