@@ -69,7 +69,10 @@ jobs:
       - name: Crash durability
         run: |
           set +e
-          work="$(mktemp -d)"; chmod 700 "$work"
+          # 777 on purpose: the image runs as root (the performance harness hands out a
+          # root-owned data directory), while the runner is unprivileged, so a 700 dir owned by
+          # the runner would be unwritable for the container.
+          work="$(mktemp -d)"; chmod 777 "$work"
           start() {
             docker rm -f mvd >/dev/null 2>&1
             mkfifo "$work/f.$$.$1" 2>/dev/null
