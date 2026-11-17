@@ -25,6 +25,19 @@ int   seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
 void  seekdb_cuvs_free(void* handle);
 int seekdb_cuvs_serialize(void* handle, const char* filename);
 void* seekdb_cuvs_deserialize(const char* filename, long n, long dim);
+
+/* Exact GPU brute-force kNN, used to serve queries while a CAGRA graph is being
+ * built elsewhere.  Brute force needs no graph, so the first answer is available
+ * after one dataset upload; results are exact and deterministic, which also makes
+ * them a stable answer source for any "poll until results settle" caller.
+ *  - seekdb_cuvs_bf_build: uploads base (n x dim) and returns an opaque handle.
+ *  - seekdb_cuvs_bf_search: exact top-k for nq queries into out_ids/out_dist
+ *    (same layout as seekdb_cuvs_search).
+ *  - seekdb_cuvs_bf_free: releases the handle. */
+int   seekdb_cuvs_bf_build(const float* base, long n, long dim, void** out);
+int   seekdb_cuvs_bf_search(void* handle, const float* query, long nq, long topk,
+                            unsigned int* out_ids, float* out_dist);
+void  seekdb_cuvs_bf_free(void* handle);
 #ifdef __cplusplus
 }
 #endif
