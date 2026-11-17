@@ -707,7 +707,7 @@ inline float f16_to_f32(uint16_t h) {
 }  // namespace
 
 #if defined(__x86_64__)
-__attribute__((target("avx2,f16c"))) inline double half_l2_sq_avx2(const uint16_t *a,
+__attribute__((target("avx2,fma,f16c"))) inline double half_l2_sq_avx2(const uint16_t *a,
                                                                   const uint16_t *b, size_t n) {
   __m256 acc = _mm256_setzero_ps();
   size_t k = 0;
@@ -759,7 +759,8 @@ inline double half_l2_sq(const uint16_t *a, const uint16_t *b, size_t n) {
   }
   return static_cast<double>(total);
 #elif defined(__x86_64__)
-  if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("f16c")) {
+  if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") &&
+      __builtin_cpu_supports("f16c")) {
     return half_l2_sq_avx2(a, b, n);
   }
   double total = 0.0;
