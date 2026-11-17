@@ -5,6 +5,12 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+#if defined(__x86_64__)
+#include <immintrin.h>
+#endif
 #include <cstring>
 #include <map>
 
@@ -633,6 +639,145 @@ Result Engine::exec_delete(const Stmt &stmt, std::vector<int64_t> &removed) {
   return r;
 }
 
+
+namespace {
+// Minimal IEEE-754 binary32 <-> binary16 conversion.  Round-to-nearest-even in the narrowing
+// direction, which is what a quantised candidate filter needs; overflow saturates to infinity.
+inline uint16_t f32_to_f16(float f) {
+  uint32_t x;
+  std::memcpy(&x, &f, sizeof(x));
+  const uint32_t sign = (x >> 16) & 0x8000u;
+  int32_t exp = static_cast<int32_t>((x >> 23) & 0xffu) - 127 + 15;
+  uint32_t mant = x & 0x7fffffu;
+  if (((x >> 23) & 0xffu) == 0xffu) {
+    return static_cast<uint16_t>(sign | 0x7c00u | (mant ? 0x200u : 0u));
+  }
+  if (exp >= 0x1f) {
+    return static_cast<uint16_t>(sign | 0x7c00u);  // saturate to infinity
+  }
+  if (exp <= 0) {
+    if (exp < -10) {
+      return static_cast<uint16_t>(sign);
+    }
+    mant |= 0x800000u;
+    const uint32_t shift = static_cast<uint32_t>(14 - exp);
+    uint16_t out = static_cast<uint16_t>(sign | (mant >> shift));
+    const uint32_t rem = mant & ((1u << shift) - 1u);
+    const uint32_t halfway = 1u << (shift - 1);
+    if (rem > halfway || (rem == halfway && (out & 1u))) {
+      ++out;
+    }
+    return out;
+  }
+  uint16_t out = static_cast<uint16_t>(sign | (static_cast<uint32_t>(exp) << 10) | (mant >> 13));
+  const uint32_t rem = mant & 0x1fffu;
+  if (rem > 0x1000u || (rem == 0x1000u && (out & 1u))) {
+    ++out;
+  }
+  return out;
+}
+
+inline float f16_to_f32(uint16_t h) {
+  const uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
+  const uint32_t exp = (h >> 10) & 0x1fu;
+  const uint32_t mant = h & 0x3ffu;
+  uint32_t bits;
+  if (exp == 0) {
+    if (mant == 0) {
+      bits = sign;
+    } else {
+      uint32_t e = 0;
+      uint32_t m = mant;
+      while ((m & 0x400u) == 0) {
+        m <<= 1;
+        ++e;
+      }
+      m &= 0x3ffu;
+      bits = sign | ((127 - 15 - e) << 23) | (m << 13);
+    }
+  } else if (exp == 0x1f) {
+    bits = sign | 0x7f800000u | (mant << 13);
+  } else {
+    bits = sign | ((exp - 15 + 127) << 23) | (mant << 13);
+  }
+  float f;
+  std::memcpy(&f, &bits, sizeof(f));
+  return f;
+}
+}  // namespace
+
+#if defined(__x86_64__)
+__attribute__((target("avx2,f16c"))) inline double half_l2_sq_avx2(const uint16_t *a,
+                                                                  const uint16_t *b, size_t n) {
+  __m256 acc = _mm256_setzero_ps();
+  size_t k = 0;
+  for (; k + 8 <= n; k += 8) {
+    const __m128i ha = _mm_loadu_si128(reinterpret_cast<const __m128i *>(a + k));
+    const __m128i hb = _mm_loadu_si128(reinterpret_cast<const __m128i *>(b + k));
+    const __m256 va = _mm256_cvtph_ps(ha);
+    const __m256 vb = _mm256_cvtph_ps(hb);
+    const __m256 d = _mm256_sub_ps(va, vb);
+    acc = _mm256_fmadd_ps(d, d, acc);
+  }
+  __m128 lo = _mm256_castps256_ps128(acc);
+  __m128 hi = _mm256_extractf128_ps(acc, 1);
+  __m128 sm = _mm_add_ps(lo, hi);
+  sm = _mm_hadd_ps(sm, sm);
+  sm = _mm_hadd_ps(sm, sm);
+  float total = _mm_cvtss_f32(sm);
+  for (; k < n; ++k) {
+    const float d = f16_to_f32(a[k]) - f16_to_f32(b[k]);
+    total += d * d;
+  }
+  return static_cast<double>(total);
+}
+#endif
+
+// Distance over half-precision copies.  Only used to order candidates; the surviving rows are
+// re-ranked with the exact float32 values, so this decides which rows are worth an exact look.
+inline double half_l2_sq(const uint16_t *a, const uint16_t *b, size_t n) {
+#if defined(__aarch64__)
+  float32x4_t acc0 = vdupq_n_f32(0.0f);
+  float32x4_t acc1 = vdupq_n_f32(0.0f);
+  size_t k = 0;
+  for (; k + 8 <= n; k += 8) {
+    const float16x8_t va = vld1q_f16(reinterpret_cast<const __fp16 *>(a + k));
+    const float16x8_t vb = vld1q_f16(reinterpret_cast<const __fp16 *>(b + k));
+    const float32x4_t a0 = vcvt_f32_f16(vget_low_f16(va));
+    const float32x4_t b0 = vcvt_f32_f16(vget_low_f16(vb));
+    const float32x4_t a1 = vcvt_f32_f16(vget_high_f16(va));
+    const float32x4_t b1 = vcvt_f32_f16(vget_high_f16(vb));
+    const float32x4_t d0 = vsubq_f32(a0, b0);
+    const float32x4_t d1 = vsubq_f32(a1, b1);
+    acc0 = vfmaq_f32(acc0, d0, d0);
+    acc1 = vfmaq_f32(acc1, d1, d1);
+  }
+  float total = vaddvq_f32(vaddq_f32(acc0, acc1));
+  for (; k < n; ++k) {
+    const float d = f16_to_f32(a[k]) - f16_to_f32(b[k]);
+    total += d * d;
+  }
+  return static_cast<double>(total);
+#elif defined(__x86_64__)
+  if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("f16c")) {
+    return half_l2_sq_avx2(a, b, n);
+  }
+  double total = 0.0;
+  for (size_t k = 0; k < n; ++k) {
+    const double d = static_cast<double>(f16_to_f32(a[k])) - f16_to_f32(b[k]);
+    total += d * d;
+  }
+  return total;
+#else
+  double total = 0.0;
+  for (size_t k = 0; k < n; ++k) {
+    const double d = static_cast<double>(f16_to_f32(a[k])) - f16_to_f32(b[k]);
+    total += d * d;
+  }
+  return total;
+#endif
+}
+
 bool Engine::ensure_scan_cache(const Table *t) {
   if (scan_cache_.epoch == mutation_epoch_ && scan_cache_.table == t->schema.name) {
     return true;
@@ -657,6 +802,33 @@ bool Engine::ensure_scan_cache(const Table *t) {
       return false;
     }
     scan_cache_.rows.emplace_back(kv.first, std::move(row));
+  }
+  // Quantised copy of the first VECTOR column, built once per epoch.  The rows are already
+  // decoded here, so the extra 2 bytes per component cost little memory (10k x 128 = 2.5 MiB)
+  // and halve the bytes the TopK scan streams.
+  scan_cache_.half_col = -1;
+  scan_cache_.half_dim = 0;
+  scan_cache_.half_rows.clear();
+  for (size_t c = 0; c < t->schema.columns.size(); ++c) {
+    if (t->schema.columns[c].type != ColType::VECTOR) {
+      continue;
+    }
+    const int64_t dim = t->schema.columns[c].length;
+    if (dim <= 0) {
+      break;
+    }
+    scan_cache_.half_rows.resize(scan_cache_.rows.size() * static_cast<size_t>(dim));
+    size_t w = 0;
+    for (const auto &entry : scan_cache_.rows) {
+      const std::vector<float> &v = entry.second[c].v;
+      for (int64_t d = 0; d < dim; ++d) {
+        scan_cache_.half_rows[w++] =
+            f32_to_f16(d < static_cast<int64_t>(v.size()) ? v[static_cast<size_t>(d)] : 0.0f);
+      }
+    }
+    scan_cache_.half_col = static_cast<int64_t>(c);
+    scan_cache_.half_dim = dim;
+    break;
   }
   scan_cache_.table = t->schema.name;
   scan_cache_.epoch = mutation_epoch_;
@@ -735,36 +907,104 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
       };
       const size_t k = static_cast<size_t>(stmt.limit);
       std::vector<Cand> heap;
-      heap.reserve((k < scan_cache_.rows.size() ? k : scan_cache_.rows.size()) + 1);
+      const size_t nrows = scan_cache_.rows.size();
+      heap.reserve((k < nrows ? k : nrows) + 1);
       bool filter_error = false;
-      for (const auto &entry : scan_cache_.rows) {
-        const Row &row = entry.second;
-        if (fpos >= 0) {
-          bool match = false;
-          std::string ferr;
-          if (!value_matches(row[static_cast<size_t>(fpos)], w.conds[0].op, w.conds[0].literal, match,
-                             ferr)) {
-            filter_error = true;
-            break;
+      const bool quantised =
+          scan_cache_.half_col == l2pos && scan_cache_.half_dim == static_cast<int64_t>(q.size()) &&
+          scan_cache_.half_rows.size() == nrows * q.size() && nrows > k * 8 + 64;
+      if (quantised) {
+        // Two-phase scan: order candidates on the half-precision copy (half the bytes per row,
+        // and the loop is bandwidth bound), then re-rank the survivors with the exact float32
+        // values.  The candidate window is 8x the limit plus a fixed margin so a row whose
+        // quantised rank slips is still re-ranked exactly.
+        const size_t wide = k * 8 + 64;
+        const size_t dim = q.size();
+        std::vector<uint16_t> qh(dim);
+        for (size_t d = 0; d < dim; ++d) {
+          qh[d] = f32_to_f16(q[d]);
+        }
+        struct QCand {
+          double d;
+          size_t idx;
+        };
+        const auto qcmp = [](const QCand &a, const QCand &b) {
+          return a.d != b.d ? a.d < b.d : a.idx < b.idx;
+        };
+        std::vector<QCand> cand;
+        cand.reserve(wide + 1);
+        for (size_t i = 0; i < nrows; ++i) {
+          const Row &row = scan_cache_.rows[i].second;
+          if (fpos >= 0) {
+            bool match = false;
+            std::string ferr;
+            if (!value_matches(row[static_cast<size_t>(fpos)], w.conds[0].op, w.conds[0].literal,
+                               match, ferr)) {
+              filter_error = true;
+              break;
+            }
+            if (!match) {
+              continue;
+            }
           }
-          if (!match) {
-            continue;
+          const double d = half_l2_sq(scan_cache_.half_rows.data() + i * dim, qh.data(), dim);
+          const QCand c{d, i};
+          if (cand.size() < wide) {
+            cand.push_back(c);
+            std::push_heap(cand.begin(), cand.end(), qcmp);
+          } else if (qcmp(c, cand.front())) {
+            std::pop_heap(cand.begin(), cand.end(), qcmp);
+            cand.back() = c;
+            std::push_heap(cand.begin(), cand.end(), qcmp);
           }
         }
-        const Cand c{l2_distance_sq(row[static_cast<size_t>(l2pos)].v, q), &entry.first};
-        if (heap.size() < k) {
-          heap.push_back(c);
-          std::push_heap(heap.begin(), heap.end(), cmp);
-        } else if (cmp(c, heap.front())) {
-          std::pop_heap(heap.begin(), heap.end(), cmp);
-          heap.back() = c;
-          std::push_heap(heap.begin(), heap.end(), cmp);
+        if (filter_error) {
+          return make_error("invalid_where", "filter could not be evaluated");
         }
+        for (const QCand &c : cand) {
+          const auto &entry = scan_cache_.rows[c.idx];
+          const Cand e{l2_distance_sq(entry.second[static_cast<size_t>(l2pos)].v, q),
+                       &entry.first};
+          if (heap.size() < k) {
+            heap.push_back(e);
+            std::push_heap(heap.begin(), heap.end(), cmp);
+          } else if (cmp(e, heap.front())) {
+            std::pop_heap(heap.begin(), heap.end(), cmp);
+            heap.back() = e;
+            std::push_heap(heap.begin(), heap.end(), cmp);
+          }
+        }
+        std::sort_heap(heap.begin(), heap.end(), cmp);
+      } else {
+        for (const auto &entry : scan_cache_.rows) {
+          const Row &row = entry.second;
+          if (fpos >= 0) {
+            bool match = false;
+            std::string ferr;
+            if (!value_matches(row[static_cast<size_t>(fpos)], w.conds[0].op, w.conds[0].literal,
+                               match, ferr)) {
+              filter_error = true;
+              break;
+            }
+            if (!match) {
+              continue;
+            }
+          }
+          const Cand c{l2_distance_sq(row[static_cast<size_t>(l2pos)].v, q), &entry.first};
+          if (heap.size() < k) {
+            heap.push_back(c);
+            std::push_heap(heap.begin(), heap.end(), cmp);
+          } else if (cmp(c, heap.front())) {
+            std::pop_heap(heap.begin(), heap.end(), cmp);
+            heap.back() = c;
+            std::push_heap(heap.begin(), heap.end(), cmp);
+          }
+        }
+        if (filter_error) {
+          return make_error("invalid_where", "filter could not be evaluated");
+        }
+        std::sort_heap(heap.begin(), heap.end(), cmp);
       }
-      if (filter_error) {
-        return make_error("invalid_where", "filter could not be evaluated");
-      }
-      std::sort_heap(heap.begin(), heap.end(), cmp);
       Result fr;
       for (const auto &it : items) {
         std::string name = it.alias;

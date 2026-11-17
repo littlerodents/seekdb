@@ -67,6 +67,13 @@ private:
     uint64_t epoch = 0;
     std::string table;
     std::vector<std::pair<int64_t, Row>> rows;
+    // Half-precision copy of one VECTOR column, row-major.  The TopK scan streams 512 B per row
+    // per query and is bandwidth bound, so a 2-byte-per-component copy halves the traffic; the
+    // exact float32 values are still used for the re-ranking pass, so only the candidate order
+    // comes from the quantised copy.
+    std::vector<uint16_t> half_rows;
+    int64_t half_col = -1;
+    int64_t half_dim = 0;
   };
   ScanCache scan_cache_;
   uint64_t mutation_epoch_ = 1;
