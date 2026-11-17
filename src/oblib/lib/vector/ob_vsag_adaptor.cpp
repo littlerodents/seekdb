@@ -262,6 +262,49 @@ static bool ob_cuvs_vsag_ready(void *key) {
   auto it = g_ob_cuvs_reg.find(key);
   return it != g_ob_cuvs_reg.end() && it->second->vsag_ready_;
 }
+// cuVS overflows the ~1.5 MiB OB worker stacks (this is why every other cuVS call
+// here runs on a 32 MiB pthread); the brute-force calls are no exception.  The
+// first bf-serve submission called them on the worker thread directly and the run
+// died 8.5 minutes in - the same stack-overflow shape the CAGRA path fixed long ago.
+struct ObCuvsBfBuildJob { const float *base; long n; int dim; void *out; };
+static void *ob_cuvs_bf_build_job(void *arg) {
+  ObCuvsBfBuildJob *j = static_cast<ObCuvsBfBuildJob *>(arg);
+  void *h = nullptr;
+  if (seekdb_cuvs_bf_build(j->base, j->n, j->dim, &h) != 0) { h = nullptr; }
+  j->out = h;
+  return nullptr;
+}
+static int ob_cuvs_bf_build_big_stack(const float *base, long n, int dim, void **out) {
+  ObCuvsBfBuildJob job{base, n, dim, nullptr};
+  pthread_t tid; pthread_attr_t attr; pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, 32UL * 1024 * 1024);
+  int rc = -1;
+  if (pthread_create(&tid, &attr, ob_cuvs_bf_build_job, &job) == 0) {
+    pthread_join(tid, nullptr);
+    rc = 0;
+    *out = job.out;
+  }
+  pthread_attr_destroy(&attr);
+  return rc;
+}
+struct ObCuvsBfSearchJob {
+  void *bf; const float *query; long topk;
+  unsigned *off; float *dst; int rc;
+};
+static void *ob_cuvs_bf_search_job(void *arg) {
+  ObCuvsBfSearchJob *j = static_cast<ObCuvsBfSearchJob *>(arg);
+  j->rc = seekdb_cuvs_bf_search(j->bf, j->query, 1, j->topk, j->off, j->dst);
+  return nullptr;
+}
+static int ob_cuvs_bf_search_big_stack(void *bf, const float *query, long topk,
+                                       unsigned *off, float *dst) {
+  ObCuvsBfSearchJob job{bf, query, topk, off, dst, -1};
+  pthread_t tid; pthread_attr_t attr; pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, 32UL * 1024 * 1024);
+  if (pthread_create(&tid, &attr, ob_cuvs_bf_search_job, &job) == 0) { pthread_join(tid, nullptr); }
+  pthread_attr_destroy(&attr);
+  return job.rc;
+}
 static void ob_cuvs_erase(void *key) {
   { std::lock_guard<std::mutex> mg(g_ob_cuvs_marked_mu); g_ob_cuvs_marked.erase(key); }
   std::lock_guard<std::mutex> guard(g_ob_cuvs_mu);
@@ -382,15 +425,15 @@ static bool ob_cuvs_try_search(void *key, vsag::Allocator *alloc,
     // exact scan over everything currently buffered
     if (ent->bf_ == nullptr || ent->bf_n_ != n) {
       void *bf = nullptr;
-      if (seekdb_cuvs_bf_build(ent->buf_vecs_.data(), static_cast<long>(n),
-                               ent->dim_, &bf) == 0 && bf != nullptr) {
+      if (ob_cuvs_bf_build_big_stack(ent->buf_vecs_.data(), static_cast<long>(n),
+                                      ent->dim_, &bf) == 0 && bf != nullptr) {
         if (ent->bf_ != nullptr) { seekdb_cuvs_bf_free(ent->bf_); }
         ent->bf_ = bf;
         ent->bf_n_ = n;
       }
     }
     if (ent->bf_ != nullptr && ent->bf_n_ == n) {
-      rc = seekdb_cuvs_bf_search(ent->bf_, query, 1, topk, off.data(), dst.data());
+      rc = ob_cuvs_bf_search_big_stack(ent->bf_, query, topk, off.data(), dst.data());
       id_map = &ent->buf_ids_;
       if (rc == 0) { ob_vsag_trace("cuvs_bf_serve", key, static_cast<long>(topk), static_cast<long>(n)); }
     }
