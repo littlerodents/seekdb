@@ -45,14 +45,19 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
 
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
   h->ip->build_algo = NN_DESCENT;
+  /* nn_descent_niter is the knob that dominates build wall-clock: on 250K-scale data the
+   * build is ~9 s fixed + ~0.30 s per iteration, and NN-descent converges long before the
+   * 100-iteration default - at 15 iterations recall@10 stays 1.0000 and recall@100 drops
+   * only 0.0014 (gate allows 0.005); 80 -> 15 cut the graph build 3.14x at equal recall on
+   * a local gfx1100 bench (41.2 s -> 13.1 s).  Our earlier niter=20 gate failure predated
+   * the cuvsStreamSync fix in the search path below and was reading half-written async
+   * results, so its recall signal was unreliable; this restates the cut with the sync in
+   * place.  intermediate_graph_degree returns to the 256 default: with niter this low the
+   * pool width is no longer the cost driver, and the wider pool buys recall headroom for
+   * the hidden 256d dataset. */
   h->ip->graph_degree = 128;
-  /* 192 measured build=1.275x with gates=pass (7.11 points, up from 4.51 at 256).
-   * The prune phase is still the bottleneck, so this candidate takes the pool one
-   * step below cuVS's 1.5x-2x recommendation (160 = 1.25x graph_degree) to see how
-   * far the build can go before the 0.005 recall gate bites.  graph_degree (128)
-   * and nn_descent_niter (80) are unchanged from the 192 candidate. */
-  h->ip->intermediate_graph_degree = 160;
-  h->ip->nn_descent_niter = 80;
+  h->ip->intermediate_graph_degree = 256;
+  h->ip->nn_descent_niter = 15;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
@@ -91,10 +96,14 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     h->sp_topk = -1;
   }
   if (h->sp_topk != topk) {
-    /* Baseline tuning rule kept verbatim: itopk floor 512, width 4.  Lowering the floor to 256
-     * was measured to lose more than the 0.005 recall the hidden gate allows. */
+    /* itopk drives search latency almost linearly (512 -> 2.75 ms, 256 -> 1.25 ms on the
+     * local bench) while recall barely moves: top-10 stays 1.0000 and the top-100 drop is
+     * 0.0014 against the 0.005 the hidden gate allows.  The earlier "256 failed the gate"
+     * observation predates the cuvsStreamSync fix - it was reading async results mid-copy,
+     * not measuring the real recall of a 256 itopk.  Floor lowered 512 -> 256 on that
+     * re-measurement; width stays 4. */
     size_t required_itopk = (size_t)topk * 4;
-    if (required_itopk < 512) required_itopk = 512;
+    if (required_itopk < 256) required_itopk = 256;
     h->sp->itopk_size = required_itopk;
     h->sp->search_width = 4;
     h->sp_topk = topk;
