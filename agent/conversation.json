@@ -170,6 +170,33 @@
     },
     {
       "id": "C8",
+      "topic": "学生把复合故障拆成三步迭代，并规定「先取证再改代码」的顺序",
+      "record_note": "会话 seq 5398 / 5418。这是 600069 的一段，属于同一会话内的迭代方法论，作为「实验与反馈迭代」维度的直接证据收录。",
+      "turns": [
+        {
+          "speaker": "agent",
+          "text": "600069 现在有三处待修：t1_dml 的主键更新没生效、max_concurrency 可能相对 dc0d3aec 有回归、CI 还缺 FILE_SQL_COPY_CMD / FILE_SQL_CLEANUP_CMD 两个环境变量。要一起改还是分开？"
+        },
+        {
+          "speaker": "student",
+          "text": "①修 UPDATE hook 激活（t1_dml）；②对比 dc0d3aec 判 max_concurrency 是否回归；③给 CI 补 FILE_SQL_COPY_CMD/FILE_SQL_CLEANUP_CMD 再跑一轮，全绿就提测 600069"
+        },
+        {
+          "speaker": "agent",
+          "text": "三处一起改的话，如果结果不对就分不清是哪一处引起的。要不要先只改 hook？"
+        },
+        {
+          "speaker": "student",
+          "text": "一轮先把 finish_write 的 affected 打出来定位，然后再一次性修完 + 补 CI 环境变量 + 重跑"
+        },
+        {
+          "speaker": "agent",
+          "text": "按这个顺序做：第一轮只加 affected 日志确认 hook 真的没触发（不改逻辑），确认后一次性修完三处，补上两个 CI 环境变量，最后全量重跑。600069 随后拿到 160/160 满分。"
+        }
+      ]
+    },
+    {
+      "id": "C9",
       "topic": "把目标改成「先做到拿分门槛」",
       "record_note": "会话 seq 9592。学生贴出平台榜单的三档门槛后给出优先级约束。",
       "turns": [
@@ -360,6 +387,15 @@
         "follow_through": "该约束被完整执行：分支名、commit SHA、改动文件清单、protocol_check 20/20 与强杀/重启/回滚的原始输出都回报了；120 万行内存用例也在其中。E12 是本轮按同一标准做的提交前复测。",
         "dimension_hint": "取舍与反思 / 独立验证与质疑",
         "evidence_level": "把「验证」定义为可检验的产物而非口头结论（明确拒绝「只说通过」），这是评审级要求；但自测的执行由 Agent 完成"
+      },
+      {
+        "id": "U8",
+        "json_pointer": "/conversations/7/turns/1/text",
+        "quote": "①修 UPDATE hook 激活（t1_dml）；②对比 dc0d3aec 判 max_concurrency 是否回归；③给 CI 补 FILE_SQL_COPY_CMD/FILE_SQL_CLEANUP_CMD 再跑一轮，全绿就提测 600069",
+        "observation": "面对一个复合故障，学生把迭代拆成三步并规定顺序：先修功能缺陷、再对照历史 commit 判是否回归、最后补齐 CI 环境变量重跑。三步各自有独立判据，且设置了明确的停止条件（全绿才提测）。下一轮进一步收窄为「先把 finish_write 的 affected 打出来定位，然后再一次性修完 + 补环境变量 + 重跑」——先取证据再改代码，避免同时改动多个变量。",
+        "follow_through": "按该顺序执行后 600069 拿到 160/160 满分。这个「先定位、再一次修完、最后全量重跑」的循环与本轮 600081 的做法一致（E9 穷举定位 → 一次性修两处 → E12 全量复测）。",
+        "dimension_hint": "实验与反馈迭代 / 问题理解与自主拆解",
+        "evidence_level": "迭代计划有明确分步判据和停止条件，且被后续满分验证；但每一步的执行与代码修复由 Agent 完成"
       }
     ]
   },
