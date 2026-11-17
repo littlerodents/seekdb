@@ -45,12 +45,13 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
 
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
   h->ip->build_algo = NN_DESCENT;
-  /* graph_degree is the out-degree of the finished graph and had never been moved off the
-   * 128 default.  Unlike intermediate_graph_degree (the prune pool) it changes how many edges
-   * the prune phase has to keep, so it is the remaining lever on build time.  160 for the pool
-   * kept graph_degree at 1.25x, the ratio cuVS documents as the floor of the recommended band;
-   * 96 finishes the graph at 96 edges and is the smallest step below the default that still
-   * leaves a healthy neighbourhood.  The 0.005 recall gate is the constraint to watch. */
+  /* graph_degree 96 on its own failed the recall gate (hidden250k recall@10 and recall@100
+   * both dropped past the allowed 0.005).  A thinner graph loses neighbours, and the search
+   * then cannot find them again because it explores a fixed width.  Search width is the
+   * compensating control: raise it so each hop examines more candidates, and the thinner
+   * graph becomes reachable again.  Build gets the 128->96 saving on the prune phase (the
+   * part that actually costs time), query pays a wider beam but starts from 1.076x so it has
+   * room.  Both knobs are moved together; moving graph_degree alone is already known to fail. */
   h->ip->graph_degree = 96;
   h->ip->intermediate_graph_degree = 160;
   h->ip->nn_descent_niter = 80;
@@ -92,12 +93,13 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     h->sp_topk = -1;
   }
   if (h->sp_topk != topk) {
-    /* Baseline tuning rule kept verbatim: itopk floor 512, width 4.  Lowering the floor to 256
-     * was measured to lose more than the 0.005 recall the hidden gate allows. */
+    /* itopk floor stays 512: lowering it to 256 was measured to lose more than the 0.005
+     * recall the hidden gate allows.  Width goes 4 -> 8 together with the graph_degree cut
+     * (see the build comment): the thinner graph needs a wider beam to stay reachable. */
     size_t required_itopk = (size_t)topk * 4;
     if (required_itopk < 512) required_itopk = 512;
     h->sp->itopk_size = required_itopk;
-    h->sp->search_width = 4;
+    h->sp->search_width = 8;
     h->sp_topk = topk;
   }
   {
