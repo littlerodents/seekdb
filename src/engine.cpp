@@ -729,6 +729,7 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
       struct Cand {
         double d;
         const int64_t *pk;
+        size_t idx;  // scan-cache row position, so a hit is materialised without a re-read
       };
       const auto cmp = [](const Cand &a, const Cand &b) {
         return a.d != b.d ? a.d < b.d : *a.pk < *b.pk;
@@ -737,7 +738,8 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
       std::vector<Cand> heap;
       heap.reserve((k < scan_cache_.rows.size() ? k : scan_cache_.rows.size()) + 1);
       bool filter_error = false;
-      for (const auto &entry : scan_cache_.rows) {
+      for (size_t ri = 0; ri < scan_cache_.rows.size(); ++ri) {
+        const auto &entry = scan_cache_.rows[ri];
         const Row &row = entry.second;
         if (fpos >= 0) {
           bool match = false;
@@ -751,7 +753,7 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
             continue;
           }
         }
-        const Cand c{l2_distance_sq(row[static_cast<size_t>(l2pos)].v, q), &entry.first};
+        const Cand c{l2_distance_sq(row[static_cast<size_t>(l2pos)].v, q), &entry.first, ri};
         if (heap.size() < k) {
           heap.push_back(c);
           std::push_heap(heap.begin(), heap.end(), cmp);
@@ -774,10 +776,7 @@ Result Engine::exec_select(const Stmt &stmt, const std::string &search_mode) {
         fr.columns.push_back(name);
       }
       for (const auto &c : heap) {
-        Row row;
-        if (!storage_.get_row(stmt.table, *c.pk, row)) {
-          return make_error("io_error", "cannot read row");
-        }
+        const Row &row = scan_cache_.rows[c.idx].second;
         std::vector<Value> out;
         out.reserve(items.size());
         for (const auto &it : items) {
